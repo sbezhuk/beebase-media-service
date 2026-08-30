@@ -1,0 +1,392 @@
+openapi: 3.0.3
+info:
+  title: BeeBase Media Service API
+  description: >
+    Reusable file/media upload service for BeeBase, an open-source backend
+    for a beekeeper management application split into microservices.
+    Access tokens are issued by auth-service (see its OpenAPI spec); this
+    service verifies them against auth-service's public key and never
+    trusts a userID from anywhere but a verified token.
+
+    A file (photo, PDF, XML, or other document) attaches to exactly one
+    owning entity in another service - currently an apiary or a hive.
+    Uploading requires that the caller own the referenced owner; this
+    service confirms that by forwarding the caller's own access token to
+    apiary-service's or hive-service's GET /api/v1/{apiaries,hives}/{id}
+    and trusting its answer - it never queries apiary or hive ownership
+    itself, and never embeds Apiary/Hive-specific logic: owner_type and
+    owner_id are generic so the same infrastructure can support future
+    entity types without a schema change.
+
+    Storage note (MVP): file bytes are stored directly in PostgreSQL,
+    gzip-compressed where that helps, rather than in a separate object
+    store. GET .../download is the stable, authenticated URL a client
+    fetches or displays a file from; there's no public/unauthenticated
+    URL, and no separate object-storage credential to manage.
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: system
+    description: Liveness and readiness probes.
+  - name: media
+    description: Upload, retrieve, download, list, and delete files attached to an apiary or a hive.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      security: []
+      description: Always returns 200 while the process is running. Has no dependencies.
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusResponse" }
+
+  /ready:
+    get:
+      tags: [system]
+      summary: Readiness probe
+      security: []
+      description: Returns 200 only if the database is reachable.
+      responses:
+        "200":
+          description: The service is ready to receive traffic.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusResponse" }
+        "503":
+          description: A dependency (the database) is unreachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusResponse" }
+
+  /api/v1/media:
+    post:
+      tags: [media]
+      summary: Upload a file, attached to an apiary or a hive the caller owns
+      description: >
+        multipart/form-data. Rejected with 404 apiary_not_found /
+        hive_not_found if owner_id doesn't exist or doesn't belong to the
+        caller - verified live against apiary-service/hive-service, not
+        trusted from the request. The server never trusts the client's
+        declared file type: the extension is checked against an allowlist
+        and, where reliably sniffable, cross-checked against the file's
+        actual bytes.
+
+        media_id is an optional client-generated idempotency key: retrying
+        the same upload (e.g. after a network failure) with the same
+        media_id returns the already-stored file (200) instead of creating
+        a duplicate (201). Reusing an ID that belongs to a different
+        user's upload is rejected with 409 media_id_conflict.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/UploadMediaRequest" }
+      responses:
+        "201":
+          description: File uploaded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MediaResponse" }
+        "200":
+          description: Idempotent replay of a previous upload (same media_id, same caller).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MediaResponse" }
+        "400":
+          description: Request failed validation (missing/malformed owner_type, owner_id, media_id, or no file part).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: owner_id doesn't exist, or belongs to a different user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: media_id already belongs to a different user's upload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          description: The file exceeds the configured maximum upload size.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "415":
+          description: Unrecognized file extension, or its content doesn't match what the extension implies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    get:
+      tags: [media]
+      summary: List the authenticated user's files attached to one owner
+      description: >
+        Returns only files owned by the caller and attached to the given
+        owner_type/owner_id - never another user's - as a page of results.
+        Omitting page/limit falls back to page=1, limit=20.
+      parameters:
+        - name: owner_type
+          in: query
+          required: true
+          schema: { type: string, enum: [apiary, hive] }
+        - name: owner_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: page
+          in: query
+          description: 1-indexed page number.
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          description: Rows per page.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: A page of the caller's files attached to the given owner.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/MediaResponse" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          description: owner_type, owner_id, page, or limit is missing or invalid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/media/{mediaId}:
+    parameters:
+      - name: mediaId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+
+    get:
+      tags: [media]
+      summary: Get one of the authenticated user's files' metadata
+      description: >
+        Returns 404 both when mediaId doesn't exist and when it belongs to
+        a different user - the two cases are indistinguishable to the
+        caller, by design.
+      responses:
+        "200":
+          description: The file's metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MediaResponse" }
+        "400":
+          description: mediaId is not a valid UUID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: No such file, or it belongs to a different user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    delete:
+      tags: [media]
+      summary: Delete a file
+      description: >
+        The metadata row is soft-deleted (deleted_at is set) for future
+        sync support, and the stored file content is removed immediately.
+      responses:
+        "204":
+          description: The file is deleted (or already was).
+        "400":
+          description: mediaId is not a valid UUID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: No such file, or it belongs to a different user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/media/{mediaId}/download:
+    parameters:
+      - name: mediaId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+
+    get:
+      tags: [media]
+      summary: Download a file's content
+      description: >
+        The stable, authenticated URL a client fetches or displays a file
+        from. Content-Type reflects the stored canonical MIME type, and
+        Content-Disposition suggests the original filename.
+      responses:
+        "200":
+          description: The file's raw content.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400":
+          description: mediaId is not a valid UUID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: No such file, or it belongs to a different user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: An access token issued by auth-service's /api/v1/auth/login (or /register or /refresh).
+
+  schemas:
+    StatusResponse:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+
+    UploadMediaRequest:
+      type: object
+      required: [owner_type, owner_id, file]
+      properties:
+        owner_type:
+          type: string
+          enum: [apiary, hive]
+          description: The type of entity this file attaches to.
+        owner_id:
+          type: string
+          format: uuid
+          description: Must be an apiary or hive (per owner_type) owned by the caller.
+        media_id:
+          type: string
+          format: uuid
+          description: Optional client-generated idempotency key for safely retrying a failed upload.
+        file:
+          type: string
+          format: binary
+
+    MediaResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [apiary, hive] }
+        owner_id: { type: string, format: uuid }
+        original_filename: { type: string }
+        content_type: { type: string, example: image/jpeg }
+        size_bytes: { type: integer, format: int64 }
+        status: { type: string, enum: [available] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Pagination:
+      type: object
+      description: Metadata describing the requested page relative to the full result set.
+      required: [page, limit, total, total_pages, has_next, has_previous]
+      properties:
+        page: { type: integer, example: 1 }
+        limit: { type: integer, example: 20 }
+        total: { type: integer, description: Total matching rows across all pages., example: 12 }
+        total_pages: { type: integer, example: 1 }
+        has_next: { type: boolean }
+        has_previous: { type: boolean }
+
+    ErrorResponse:
+      type: object
+      description: >
+        "code" is the stable, machine-readable key: build any localized
+        message off of it, not off "message" (an English fallback for logs
+        and manual debugging, not meant to be shown to end users).
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - media_not_found
+                - invalid_media_id
+                - apiary_not_found
+                - hive_not_found
+                - invalid_owner_type
+                - unsupported_file_type
+                - file_too_large
+                - media_id_conflict
+                - file_required
+                - missing_authorization
+                - invalid_access_token
+                - invalid_body
+                - internal_error
+              example: media_not_found
+            message: { type: string, example: media not found }
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, enum: [validation_error] }
+            message: { type: string, example: request validation failed }
+            fields:
+              type: object
+              description: >
+                Field name to error code. Each value is a stable key (not a
+                human-readable message) meant to be localized client-side.
+              additionalProperties:
+                type: string
+                enum:
+                  - owner_type_required
+                  - owner_type_invalid
+                  - owner_id_required
+                  - owner_id_invalid
+                  - media_id_invalid
+                  - invalid_page
+                  - invalid_limit
+              example: { owner_type: "owner_type_invalid" }

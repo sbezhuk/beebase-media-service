@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-beebase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beebase}
+      POSTGRES_DB: ${POSTGRES_DB:-beebase_media}
+    ports:
+      - "5436:5432"
+    volumes:
+      - beebase_media_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-beebase} -d ${POSTGRES_DB:-beebase_media}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot job: applies pending migrations, then exits. Kept separate
+  # from the app so migrations run exactly once per `docker compose up`,
+  # not once per horizontally-scaled app replica.
+  migrate:
+    image: migrate/migrate:v4.19.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=postgres://${POSTGRES_USER:-beebase}:${POSTGRES_PASSWORD:-beebase}@postgres:5432/${POSTGRES_DB:-beebase_media}?sslmode=disable
+      - up
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Overrides .env's localhost DSN: within the compose network the
+      # database is reachable at the service name "postgres", not localhost.
+      DATABASE_URL: postgres://${POSTGRES_USER:-beebase}:${POSTGRES_PASSWORD:-beebase}@postgres:5432/${POSTGRES_DB:-beebase_media}?sslmode=disable
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  beebase_media_postgres_data:
