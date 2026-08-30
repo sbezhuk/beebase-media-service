@@ -17,11 +17,13 @@ Related services: `beebase-auth-service` (users, refresh tokens, JWT
 issuing), `beebase-apiary-service`, `beebase-hive-service`,
 `beebase-gateway` (single entry point for clients).
 
-**Not yet wired up** (deliberately, for now): `beebase-apiary-service`
-and `beebase-hive-service` don't yet expose their own
-"this apiary/hive has these photos" endpoints referencing this service,
-and `beebase-gateway` doesn't yet proxy `/api/v1/media`. This service is
-fully functional standalone; that integration is a follow-up.
+This service is reachable through `beebase-gateway` at `/api/v1/media`,
+same as every other backend service — see its docker-compose for the
+full stack. **Not yet wired up** (deliberately, for now):
+`beebase-apiary-service` and `beebase-hive-service` don't yet expose
+their own "this apiary/hive has these photos" endpoints referencing this
+service. This service is fully functional standalone or behind the
+gateway either way; that integration is a follow-up.
 
 ## Requirements
 
@@ -73,8 +75,8 @@ The full API surface is documented in [api/openapi.yaml](api/openapi.yaml).
 Note: this repo's `docker-compose.yml` is for standalone single-service
 development only. To run the full BeeBase stack together, use
 `beebase-gateway`'s docker-compose, which builds every service from
-sibling checkouts and routes between them (media-service isn't wired into
-that yet — see the note above).
+sibling checkouts and routes between them, including this one at
+`/api/v1/media`.
 
 ## Configuration
 
