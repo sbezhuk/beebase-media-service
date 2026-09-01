@@ -64,9 +64,9 @@ APIARY_ID=...  # an apiary that TOKEN's owner created via apiary-service
 
 curl -X POST http://localhost:8080/api/v1/media \
   -H "Authorization: Bearer $TOKEN" \
-  -F "owner_type=apiary" -F "owner_id=$APIARY_ID" -F "file=@hive1.jpg"
+  -F "owner_type=APIARY" -F "owner_id=$APIARY_ID" -F "file=@hive1.jpg"
 
-curl "http://localhost:8080/api/v1/media?owner_type=apiary&owner_id=$APIARY_ID" \
+curl "http://localhost:8080/api/v1/media?owner_type=APIARY&owner_id=$APIARY_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

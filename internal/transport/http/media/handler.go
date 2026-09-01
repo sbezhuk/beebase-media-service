@@ -292,7 +292,7 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, appmedia.ErrHiveNotFound):
 		httpx.WriteError(w, http.StatusNotFound, CodeHiveNotFound, "hive not found")
 	case errors.Is(err, appmedia.ErrInvalidOwnerType):
-		httpx.WriteError(w, http.StatusBadRequest, CodeInvalidOwnerType, `owner_type must be "apiary" or "hive"`)
+		httpx.WriteError(w, http.StatusBadRequest, CodeInvalidOwnerType, `owner_type must be "APIARY" or "HIVE"`)
 	case errors.Is(err, appmedia.ErrUnsupportedMIME):
 		httpx.WriteError(w, http.StatusUnsupportedMediaType, CodeUnsupportedFileType, "unsupported file type")
 	case errors.Is(err, appmedia.ErrFileTooLarge):

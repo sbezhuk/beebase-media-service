@@ -144,7 +144,7 @@ paths:
         - name: owner_type
           in: query
           required: true
-          schema: { type: string, enum: [apiary, hive] }
+          schema: { type: string, enum: [APIARY, HIVE] }
         - name: owner_id
           in: query
           required: true
@@ -298,7 +298,7 @@ components:
       properties:
         owner_type:
           type: string
-          enum: [apiary, hive]
+          enum: [APIARY, HIVE]
           description: The type of entity this file attaches to.
         owner_id:
           type: string
@@ -316,7 +316,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        owner_type: { type: string, enum: [apiary, hive] }
+        owner_type: { type: string, enum: [APIARY, HIVE] }
         owner_id: { type: string, format: uuid }
         original_filename: { type: string }
         content_type: { type: string, example: image/jpeg }

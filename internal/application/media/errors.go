@@ -13,9 +13,9 @@ var (
 	// ErrHiveNotFound is the hive equivalent of ErrApiaryNotFound.
 	ErrHiveNotFound = errors.New("hive not found")
 
-	// ErrInvalidOwnerType is returned when owner_type isn't "apiary" or
-	// "hive".
-	ErrInvalidOwnerType = errors.New(`owner type must be "apiary" or "hive"`)
+	// ErrInvalidOwnerType is returned when owner_type isn't "APIARY" or
+	// "HIVE".
+	ErrInvalidOwnerType = errors.New(`owner type must be "APIARY" or "HIVE"`)
 
 	// ErrUnsupportedMIME is returned when a file's extension isn't
 	// recognized, or its sniffed content doesn't match what the extension

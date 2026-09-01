@@ -14,15 +14,15 @@ import (
 // entity, so the same infrastructure can support additional entity types
 // later without a schema change.
 const (
-	OwnerTypeApiary = "apiary"
-	OwnerTypeHive   = "hive"
+	OwnerTypeApiary = "APIARY"
+	OwnerTypeHive   = "HIVE"
 )
 
 // StatusAvailable is the only status a Media row currently has. It's kept
 // as a real column (rather than folded into deleted_at) purely as a
 // forward-compatible extension point, e.g. a future async
 // virus-scan/quarantine state.
-const StatusAvailable = "available"
+const StatusAvailable = "AVAILABLE"
 
 // Media is an uploaded file (photo, PDF, XML, or other document) attached
 // to exactly one owning entity in another service (an apiary or a hive).

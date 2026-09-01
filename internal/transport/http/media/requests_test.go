@@ -17,12 +17,12 @@ func TestUploadRequest_Validate(t *testing.T) {
 	}{
 		{
 			name: "valid, no media_id",
-			req:  UploadRequest{OwnerType: "apiary", OwnerID: validOwnerID},
+			req:  UploadRequest{OwnerType: "APIARY", OwnerID: validOwnerID},
 			want: map[string]string{},
 		},
 		{
 			name: "valid, with media_id",
-			req:  UploadRequest{OwnerType: "hive", OwnerID: validOwnerID, MediaID: validMediaID},
+			req:  UploadRequest{OwnerType: "HIVE", OwnerID: validOwnerID, MediaID: validMediaID},
 			want: map[string]string{},
 		},
 		{
@@ -37,17 +37,17 @@ func TestUploadRequest_Validate(t *testing.T) {
 		},
 		{
 			name: "missing owner_id",
-			req:  UploadRequest{OwnerType: "apiary", OwnerID: ""},
+			req:  UploadRequest{OwnerType: "APIARY", OwnerID: ""},
 			want: map[string]string{"owner_id": CodeOwnerIDRequired},
 		},
 		{
 			name: "malformed owner_id",
-			req:  UploadRequest{OwnerType: "apiary", OwnerID: "not-a-uuid"},
+			req:  UploadRequest{OwnerType: "APIARY", OwnerID: "not-a-uuid"},
 			want: map[string]string{"owner_id": CodeOwnerIDInvalid},
 		},
 		{
 			name: "malformed media_id",
-			req:  UploadRequest{OwnerType: "apiary", OwnerID: validOwnerID, MediaID: "not-a-uuid"},
+			req:  UploadRequest{OwnerType: "APIARY", OwnerID: validOwnerID, MediaID: "not-a-uuid"},
 			want: map[string]string{"media_id": CodeMediaIDInvalid},
 		},
 		{
@@ -82,7 +82,7 @@ func TestListQuery_Validate(t *testing.T) {
 	}{
 		{
 			name: "valid",
-			q:    ListQuery{OwnerType: "apiary", OwnerID: validOwnerID},
+			q:    ListQuery{OwnerType: "APIARY", OwnerID: validOwnerID},
 			want: map[string]string{},
 		},
 		{
