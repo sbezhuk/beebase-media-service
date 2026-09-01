@@ -321,7 +321,7 @@ components:
         original_filename: { type: string }
         content_type: { type: string, example: image/jpeg }
         size_bytes: { type: integer, format: int64 }
-        status: { type: string, enum: [available] }
+        status: { type: string, enum: [AVAILABLE] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
