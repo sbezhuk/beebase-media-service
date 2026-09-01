@@ -235,6 +235,33 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// DeleteByOwner handles DELETE /media?owner_type=&owner_id=. It
+// hard-deletes every media item attached to that owner, used by
+// apiary-service/hive-service to cascade a delete.
+func (h *Handler) DeleteByOwner(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	q := ListQuery{
+		OwnerType: r.URL.Query().Get("owner_type"),
+		OwnerID:   r.URL.Query().Get("owner_id"),
+	}
+	if fields := q.Validate(); len(fields) > 0 {
+		httpx.WriteValidationError(w, fields)
+		return
+	}
+	ownerID, _ := uuid.Parse(q.OwnerID) // already validated by q.Validate
+
+	if _, err := h.service.DeleteByOwner(r.Context(), userID, q.OwnerType, ownerID); err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // requireUserID returns the authenticated user's ID (from context, set by
 // httpmw.RequireAuth).
 func (h *Handler) requireUserID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {

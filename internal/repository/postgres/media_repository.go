@@ -208,6 +208,21 @@ func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID)
 	return nil
 }
 
+// DeleteByOwner hard-deletes every media row for ownerType/ownerID/userID
+// in one statement. No transaction is needed here (unlike Delete): the
+// media_blobs FK is ON DELETE CASCADE, so each row's blob is removed
+// automatically as part of the same DELETE.
+func (r *MediaRepository) DeleteByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error) {
+	const q = `DELETE FROM media WHERE owner_type = $1 AND owner_id = $2 AND user_id = $3`
+
+	tag, err := r.db.Exec(ctx, q, ownerType, ownerID, userID)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: delete media by owner: %w", err)
+	}
+
+	return tag.RowsAffected(), nil
+}
+
 // compress gzip-compresses content, returning the compressed bytes and
 // true only if compression actually made it smaller. Already-compressed
 // formats like JPEG or PDF often don't shrink further; storing the raw

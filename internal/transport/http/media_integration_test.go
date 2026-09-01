@@ -460,6 +460,56 @@ func TestMediaFlow_ListFiltersByOwner(t *testing.T) {
 	}
 }
 
+// TestMediaFlow_DeleteByOwner is the end-to-end proof of the cascade
+// primitive apiary-service/hive-service call when they delete an
+// apiary/hive: every media item attached to that owner is hard-deleted,
+// while media under a different owner (even the same user's) survives.
+func TestMediaFlow_DeleteByOwner(t *testing.T) {
+	stack := newTestStack(t)
+	userID := uuid.New()
+	hiveA := uuid.New()
+	hiveB := uuid.New()
+	token := stack.tokenFor(t, userID)
+	stack.hive.allow(token, hiveA)
+
+	resp := stack.upload(t, token, uploadOpts{ownerType: "HIVE", ownerID: hiveA.String(), filename: "a.jpg", content: jpegBytes})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload for hiveA: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var inHiveA mediahttp.Response
+	decodeJSON(t, resp, &inHiveA)
+
+	stack.hive.allow(token, hiveB)
+	resp = stack.upload(t, token, uploadOpts{ownerType: "HIVE", ownerID: hiveB.String(), filename: "b.jpg", content: jpegBytes})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload for hiveB: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var inHiveB mediahttp.Response
+	decodeJSON(t, resp, &inHiveB)
+
+	resp = stack.delete(t, "/api/v1/media?owner_type=HIVE&owner_id="+hiveA.String(), token)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DeleteByOwner: status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	resp = stack.get(t, "/api/v1/media/"+inHiveA.ID.String(), token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("get hiveA media after DeleteByOwner: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+
+	resp = stack.get(t, "/api/v1/media/"+inHiveB.ID.String(), token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get hiveB media after DeleteByOwner on hiveA: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Calling it again for the same (now-empty) owner is a no-op, not an
+	// error.
+	resp = stack.delete(t, "/api/v1/media?owner_type=HIVE&owner_id="+hiveA.String(), token)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DeleteByOwner again on empty owner: status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
 func TestMediaFlow_WithoutTokenIsUnauthorized(t *testing.T) {
 	stack := newTestStack(t)
 

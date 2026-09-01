@@ -40,6 +40,10 @@ func NewRouter(
 		r.Get("/{mediaID}", mediaHandler.Get)
 		r.Get("/{mediaID}/download", mediaHandler.Download)
 		r.Delete("/{mediaID}", mediaHandler.Delete)
+		// Internal cascade primitive: called by apiary-service/hive-service
+		// when they delete an apiary/hive, forwarding the caller's own
+		// access token.
+		r.Delete("/", mediaHandler.DeleteByOwner)
 	})
 
 	return r

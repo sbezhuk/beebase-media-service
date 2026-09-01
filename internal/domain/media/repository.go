@@ -39,4 +39,11 @@ type Repository interface {
 	// Delete soft-deletes the media row (sets deleted_at) and removes its
 	// stored content, reclaiming storage immediately.
 	Delete(ctx context.Context, userID, mediaID uuid.UUID) error
+	// DeleteByOwner hard-deletes every media row (and, via the
+	// media_blobs FK's ON DELETE CASCADE, its stored content) attached to
+	// ownerID of type ownerType and belonging to userID, including rows a
+	// prior soft-delete already marked gone. Used only when apiary-service
+	// or hive-service cascades a delete; a zero count is a normal outcome
+	// (the owner may simply have no media), not an error.
+	DeleteByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error)
 }

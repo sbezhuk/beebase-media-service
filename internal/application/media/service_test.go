@@ -108,6 +108,19 @@ func (f *fakeRepo) Delete(_ context.Context, userID, mediaID uuid.UUID) error {
 	return nil
 }
 
+func (f *fakeRepo) DeleteByOwner(_ context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var count int64
+	for id, s := range f.byID {
+		if s.m.UserID == userID && s.m.OwnerType == ownerType && s.m.OwnerID == ownerID {
+			delete(f.byID, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
 // --- fake apiary/hive verifiers ---
 
 // fakeApiaryVerifier simulates apiary-service: a set of (token, apiaryID)
@@ -620,5 +633,109 @@ func TestDelete_WrongOwner_ReturnsNotFoundAndDoesNotDelete(t *testing.T) {
 
 	if _, err := svc.Get(context.Background(), owner, created.Media.ID); err != nil {
 		t.Fatalf("owner's media should survive a failed delete attempt by another user: %v", err)
+	}
+}
+
+func TestDeleteByOwner_DeletesOnlyThatOwnersMedia(t *testing.T) {
+	apiaries := newFakeApiaryVerifier()
+	hives := newFakeHiveVerifier()
+	svc := newService(newFakeRepo(), apiaries, hives)
+	userID := uuid.New()
+	hiveID := uuid.New()
+	otherHiveID := uuid.New()
+	apiaryID := uuid.New()
+	token := "token"
+	otherHiveToken := "other-hive-token"
+	hives.allow(token, hiveID)
+	hives.allow(otherHiveToken, otherHiveID)
+	apiaries.allow(token, apiaryID)
+
+	for i := 0; i < 2; i++ {
+		if _, err := svc.Upload(context.Background(), appmedia.UploadInput{
+			UserID: userID, AccessToken: token, OwnerType: media.OwnerTypeHive, OwnerID: hiveID,
+			OriginalFilename: "f.jpg", Content: jpegBytes,
+		}); err != nil {
+			t.Fatalf("Upload for hiveID: %v", err)
+		}
+	}
+	// Same owner_id value reused as a different owner_type must survive
+	// (owner_type is part of the scoping key, not just owner_id).
+	keepDifferentOwnerType, err := svc.Upload(context.Background(), appmedia.UploadInput{
+		UserID: userID, AccessToken: token, OwnerType: media.OwnerTypeApiary, OwnerID: apiaryID,
+		OriginalFilename: "f.jpg", Content: jpegBytes,
+	})
+	if err != nil {
+		t.Fatalf("Upload for apiaryID: %v", err)
+	}
+	keepOtherOwner, err := svc.Upload(context.Background(), appmedia.UploadInput{
+		UserID: userID, AccessToken: otherHiveToken, OwnerType: media.OwnerTypeHive, OwnerID: otherHiveID,
+		OriginalFilename: "f.jpg", Content: jpegBytes,
+	})
+	if err != nil {
+		t.Fatalf("Upload for otherHiveID: %v", err)
+	}
+
+	count, err := svc.DeleteByOwner(context.Background(), userID, media.OwnerTypeHive, hiveID)
+	if err != nil {
+		t.Fatalf("DeleteByOwner: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("DeleteByOwner count = %d, want 2", count)
+	}
+
+	items, total, err := svc.List(context.Background(), userID, media.OwnerTypeHive, hiveID, pagination.Params{Page: 1, Limit: pagination.DefaultLimit})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("hiveID's media survived DeleteByOwner: total=%d items=%v", total, items)
+	}
+
+	for _, keep := range []*appmedia.UploadResult{keepDifferentOwnerType, keepOtherOwner} {
+		if _, err := svc.Get(context.Background(), userID, keep.Media.ID); err != nil {
+			t.Fatalf("unrelated media %s should survive DeleteByOwner: %v", keep.Media.ID, err)
+		}
+	}
+}
+
+func TestDeleteByOwner_ScopedToUser(t *testing.T) {
+	apiaries := newFakeApiaryVerifier()
+	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
+	owner := uuid.New()
+	other := uuid.New()
+	apiaryID := uuid.New()
+	token := "owner-token"
+	apiaries.allow(token, apiaryID)
+
+	created, err := svc.Upload(context.Background(), appmedia.UploadInput{
+		UserID: owner, AccessToken: token, OwnerType: media.OwnerTypeApiary, OwnerID: apiaryID,
+		OriginalFilename: "f.jpg", Content: jpegBytes,
+	})
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	count, err := svc.DeleteByOwner(context.Background(), other, media.OwnerTypeApiary, apiaryID)
+	if err != nil {
+		t.Fatalf("DeleteByOwner by non-owner: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("DeleteByOwner by non-owner count = %d, want 0", count)
+	}
+
+	if _, err := svc.Get(context.Background(), owner, created.Media.ID); err != nil {
+		t.Fatalf("owner's media should survive another user's DeleteByOwner: %v", err)
+	}
+}
+
+func TestDeleteByOwner_ZeroMatchesIsNotAnError(t *testing.T) {
+	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+
+	count, err := svc.DeleteByOwner(context.Background(), uuid.New(), media.OwnerTypeHive, uuid.New())
+	if err != nil {
+		t.Fatalf("DeleteByOwner with no matches: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
 	}
 }

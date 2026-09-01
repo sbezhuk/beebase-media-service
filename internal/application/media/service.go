@@ -172,3 +172,10 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, ownerType string, 
 func (s *Service) Delete(ctx context.Context, userID, mediaID uuid.UUID) error {
 	return s.media.Delete(ctx, userID, mediaID)
 }
+
+// DeleteByOwner hard-deletes every media item attached to ownerID of type
+// ownerType, belonging to userID. Used when an ancestor entity (a hive or
+// an apiary) is itself being cascade-deleted.
+func (s *Service) DeleteByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error) {
+	return s.media.DeleteByOwner(ctx, userID, ownerType, ownerID)
+}

@@ -213,6 +213,104 @@ func TestMediaRepository_Delete_WrongOwnerReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestMediaRepository_DeleteByOwner_HardDeletesOnlyThatOwnersMedia(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+
+	repo := repopostgres.NewMediaRepository(tx)
+	userID := uuid.New()
+	hiveID := uuid.New()
+	apiaryID := uuid.New()
+
+	inHive1 := media.New(uuid.New(), userID, media.OwnerTypeHive, hiveID, "f1.jpg", "image/jpeg", 3)
+	inHive2 := media.New(uuid.New(), userID, media.OwnerTypeHive, hiveID, "f2.jpg", "image/jpeg", 3)
+	forApiary := media.New(uuid.New(), userID, media.OwnerTypeApiary, apiaryID, "f3.jpg", "image/jpeg", 3)
+	for _, m := range []*media.Media{inHive1, inHive2, forApiary} {
+		if err := repo.Create(ctx, m, []byte("abc")); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	// Already soft-deleted (via the single-item Delete) media under hiveID
+	// must still be purged: DeleteByOwner has no deleted_at filter.
+	alreadyGone := media.New(uuid.New(), userID, media.OwnerTypeHive, hiveID, "f4.jpg", "image/jpeg", 3)
+	if err := repo.Create(ctx, alreadyGone, []byte("abc")); err != nil {
+		t.Fatalf("Create already-gone: %v", err)
+	}
+	if err := repo.Delete(ctx, userID, alreadyGone.ID); err != nil {
+		t.Fatalf("Delete already-gone: %v", err)
+	}
+
+	count, err := repo.DeleteByOwner(ctx, userID, media.OwnerTypeHive, hiveID)
+	if err != nil {
+		t.Fatalf("DeleteByOwner: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("DeleteByOwner count = %d, want 3", count)
+	}
+
+	for _, id := range []uuid.UUID{inHive1.ID, inHive2.ID, alreadyGone.ID} {
+		var n int
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM media WHERE id = $1", id).Scan(&n); err != nil {
+			t.Fatalf("raw count for media: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("media %s still present after DeleteByOwner; want fully removed", id)
+		}
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM media_blobs WHERE media_id = $1", id).Scan(&n); err != nil {
+			t.Fatalf("raw count for media_blobs: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("media_blobs %s still present after DeleteByOwner; want cascaded away", id)
+		}
+	}
+
+	if _, err := repo.GetByID(ctx, userID, forApiary.ID); err != nil {
+		t.Fatalf("unrelated apiary media should survive DeleteByOwner: %v", err)
+	}
+}
+
+func TestMediaRepository_DeleteByOwner_ScopedToUser(t *testing.T) {
+	repo := newTestRepo(t)
+	owner := uuid.New()
+	other := uuid.New()
+	apiaryID := uuid.New()
+
+	m := media.New(uuid.New(), owner, media.OwnerTypeApiary, apiaryID, "f.jpg", "image/jpeg", 3)
+	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	count, err := repo.DeleteByOwner(context.Background(), other, media.OwnerTypeApiary, apiaryID)
+	if err != nil {
+		t.Fatalf("DeleteByOwner by non-owner: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("DeleteByOwner by non-owner count = %d, want 0", count)
+	}
+
+	if _, err := repo.GetByID(context.Background(), owner, m.ID); err != nil {
+		t.Fatalf("owner's media should survive another user's DeleteByOwner: %v", err)
+	}
+}
+
+func TestMediaRepository_DeleteByOwner_ZeroMatchesIsNotAnError(t *testing.T) {
+	repo := newTestRepo(t)
+
+	count, err := repo.DeleteByOwner(context.Background(), uuid.New(), media.OwnerTypeHive, uuid.New())
+	if err != nil {
+		t.Fatalf("DeleteByOwner with no matches: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
+	}
+}
+
 func TestMediaRepository_Create_IDConflict(t *testing.T) {
 	repo := newTestRepo(t)
 	id := uuid.New()
