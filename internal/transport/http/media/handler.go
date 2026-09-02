@@ -1,9 +1,8 @@
 // Package media holds the HTTP handlers for media upload/download.
 // Handlers stay thin: they decode/validate the request, pull the
-// authenticated user's ID (and, for Upload, their raw access token,
-// forwarded to apiary-service/hive-service) from the request, call into
-// the application service, and map the result (or error) to a response.
-// No business logic or repository access happens here.
+// authenticated user's ID from the request, call into the application
+// service, and map the result (or error) to a response. No business logic
+// or repository access happens here.
 package media
 
 import (
@@ -13,35 +12,25 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	httpmw "github.com/sbezhuk/beebase-common/authmw"
 	"github.com/sbezhuk/beebase-common/httpx"
-	"github.com/sbezhuk/beebase-common/pagination"
 	appmedia "github.com/sbezhuk/beebase-media-service/internal/application/media"
 	"github.com/sbezhuk/beebase-media-service/internal/domain/media"
 )
 
 // Error codes for media failures, returned as the top-level "error.code".
 // Each is a stable key a client can map to a localized message.
-// CodeApiaryNotFound/CodeHiveNotFound intentionally reuse
-// apiary-service's/hive-service's own code strings, since it's the same
-// meaning from the client's point of view regardless of which service
-// returned it.
 const (
 	CodeMediaNotFound       = "media_not_found"
 	CodeInvalidMediaID      = "invalid_media_id"
-	CodeApiaryNotFound      = "apiary_not_found"
-	CodeHiveNotFound        = "hive_not_found"
-	CodeInvalidOwnerType    = "invalid_owner_type"
 	CodeUnsupportedFileType = "unsupported_file_type"
 	CodeFileTooLarge        = "file_too_large"
 	CodeMediaIDConflict     = "media_id_conflict"
 	CodeFileRequired        = "file_required"
-	CodeAlreadyAttached     = "already_attached"
 )
 
 // multipartOverheadBytes accounts for multipart boundaries, headers, and
@@ -151,40 +140,6 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, newResponse(got))
 }
 
-// Attach handles POST /media/{mediaID}/attach.
-func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
-	userID, token, ok := h.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	mediaID, ok := h.pathMediaID(w, r)
-	if !ok {
-		return
-	}
-
-	var req AttachRequest
-	if !decodeAndValidate(w, r, &req) {
-		return
-	}
-	// Already validated as well-formed by req.Validate.
-	ownerID, _ := uuid.Parse(req.OwnerID)
-
-	m, err := h.service.Attach(r.Context(), appmedia.AttachInput{
-		UserID:      userID,
-		AccessToken: token,
-		MediaID:     mediaID,
-		OwnerType:   req.OwnerType,
-		OwnerID:     ownerID,
-	})
-	if err != nil {
-		h.writeServiceError(w, err)
-		return
-	}
-
-	httpx.WriteJSON(w, http.StatusOK, newResponse(m))
-}
-
 // Download handles GET /media/{mediaID}/download.
 func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.requireUserID(w, r)
@@ -210,37 +165,32 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// List handles GET /media.
+// List handles GET /media?ids=&ids=... It's the only filter this endpoint
+// accepts - no owner_type/owner_id, no page/limit.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.requireUserID(w, r)
 	if !ok {
 		return
 	}
 
-	q := ListQuery{
-		OwnerType: r.URL.Query().Get("owner_type"),
-		OwnerID:   r.URL.Query().Get("owner_id"),
-	}
-	fields := q.Validate()
-
-	p, pageFields := pagination.ParseParams(r)
-	for k, v := range pageFields {
-		fields[k] = v
-	}
-	if len(fields) > 0 {
+	q := IDsQuery{IDs: r.URL.Query()["ids"]}
+	if fields := q.Validate(); len(fields) > 0 {
 		httpx.WriteValidationError(w, fields)
 		return
 	}
 
-	ownerID, _ := uuid.Parse(q.OwnerID) // already validated by q.Validate
+	ids := make([]uuid.UUID, len(q.IDs))
+	for i, raw := range q.IDs {
+		ids[i], _ = uuid.Parse(raw) // already validated by q.Validate
+	}
 
-	items, total, err := h.service.List(r.Context(), userID, q.OwnerType, ownerID, p)
+	items, err := h.service.List(r.Context(), userID, ids)
 	if err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, pagination.NewResponse(newListResponse(items), p, total))
+	httpx.WriteJSON(w, http.StatusOK, ListResponse{Items: newListResponse(items)})
 }
 
 // Delete handles DELETE /media/{mediaID}.
@@ -263,26 +213,28 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// DeleteByOwner handles DELETE /media?owner_type=&owner_id=. It
-// hard-deletes every media item attached to that owner, used by
-// apiary-service/hive-service to cascade a delete.
-func (h *Handler) DeleteByOwner(w http.ResponseWriter, r *http.Request) {
+// DeleteByIDs handles DELETE /media?ids=&ids=... It hard-deletes every
+// media item in ids belonging to the caller, used by
+// apiary-service/hive-service to cascade a delete across every media id
+// an apiary/hive itself knows it references.
+func (h *Handler) DeleteByIDs(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.requireUserID(w, r)
 	if !ok {
 		return
 	}
 
-	q := ListQuery{
-		OwnerType: r.URL.Query().Get("owner_type"),
-		OwnerID:   r.URL.Query().Get("owner_id"),
-	}
+	q := IDsQuery{IDs: r.URL.Query()["ids"]}
 	if fields := q.Validate(); len(fields) > 0 {
 		httpx.WriteValidationError(w, fields)
 		return
 	}
-	ownerID, _ := uuid.Parse(q.OwnerID) // already validated by q.Validate
 
-	if _, err := h.service.DeleteByOwner(r.Context(), userID, q.OwnerType, ownerID); err != nil {
+	ids := make([]uuid.UUID, len(q.IDs))
+	for i, raw := range q.IDs {
+		ids[i], _ = uuid.Parse(raw) // already validated by q.Validate
+	}
+
+	if _, err := h.service.DeleteByIDs(r.Context(), userID, ids); err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
@@ -299,22 +251,6 @@ func (h *Handler) requireUserID(w http.ResponseWriter, r *http.Request) (uuid.UU
 		return uuid.Nil, false
 	}
 	return userID, true
-}
-
-// requireAuth returns the authenticated user's ID alongside their raw
-// access token (read back off the request's own Authorization header,
-// which RequireAuth already validated) so it can be forwarded to
-// apiary-service/hive-service.
-func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request) (uuid.UUID, string, bool) {
-	userID, ok := h.requireUserID(w, r)
-	if !ok {
-		return uuid.Nil, "", false
-	}
-
-	const prefix = "Bearer "
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), prefix)
-
-	return userID, token, true
 }
 
 func (h *Handler) pathMediaID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -342,20 +278,14 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, media.ErrNotFound):
 		httpx.WriteError(w, http.StatusNotFound, CodeMediaNotFound, "media not found")
-	case errors.Is(err, appmedia.ErrApiaryNotFound):
-		httpx.WriteError(w, http.StatusNotFound, CodeApiaryNotFound, "apiary not found")
-	case errors.Is(err, appmedia.ErrHiveNotFound):
-		httpx.WriteError(w, http.StatusNotFound, CodeHiveNotFound, "hive not found")
-	case errors.Is(err, appmedia.ErrInvalidOwnerType):
-		httpx.WriteError(w, http.StatusBadRequest, CodeInvalidOwnerType, `owner_type must be "APIARY" or "HIVE"`)
 	case errors.Is(err, appmedia.ErrUnsupportedMIME):
 		httpx.WriteError(w, http.StatusUnsupportedMediaType, CodeUnsupportedFileType, "unsupported file type")
 	case errors.Is(err, appmedia.ErrFileTooLarge):
 		httpx.WriteError(w, http.StatusRequestEntityTooLarge, CodeFileTooLarge, "file exceeds the maximum allowed size")
 	case errors.Is(err, appmedia.ErrMediaIDConflict):
 		httpx.WriteError(w, http.StatusConflict, CodeMediaIDConflict, "media id already used by another upload")
-	case errors.Is(err, media.ErrAlreadyAttached):
-		httpx.WriteError(w, http.StatusConflict, CodeAlreadyAttached, "media is already attached to a different owner")
+	case errors.Is(err, appmedia.ErrTooManyIDs):
+		httpx.WriteValidationError(w, map[string]string{"ids": CodeIDsTooMany})
 	default:
 		httpx.WriteInternalError(w, h.log, err)
 	}

@@ -29,14 +29,6 @@ type Config struct {
 	// ever holding a key that could mint one.
 	AuthJWKSURL string
 
-	// ApiaryServiceURL / HiveServiceURL are apiary-service's and
-	// hive-service's base URLs. A file can only be attached to an apiary
-	// or hive the caller owns, and those services are the only source of
-	// truth for that: this service asks whichever one applies, once, at
-	// upload time.
-	ApiaryServiceURL string
-	HiveServiceURL   string
-
 	// MaxUploadSizeBytes bounds how large a single uploaded file can be.
 	// File bytes are stored directly in PostgreSQL rows (see the README's
 	// Storage section), so this is kept conservative by default.
@@ -60,9 +52,7 @@ func Load() (*Config, error) {
 
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
-		AuthJWKSURL:      getEnv("AUTH_JWKS_URL", ""),
-		ApiaryServiceURL: getEnv("APIARY_SERVICE_URL", ""),
-		HiveServiceURL:   getEnv("HIVE_SERVICE_URL", ""),
+		AuthJWKSURL: getEnv("AUTH_JWKS_URL", ""),
 
 		MaxUploadSizeBytes: getInt64("MAX_UPLOAD_SIZE_BYTES", 15*1024*1024),
 	}
@@ -72,12 +62,6 @@ func Load() (*Config, error) {
 	}
 	if cfg.AuthJWKSURL == "" {
 		return nil, fmt.Errorf("config: AUTH_JWKS_URL is required")
-	}
-	if cfg.ApiaryServiceURL == "" {
-		return nil, fmt.Errorf("config: APIARY_SERVICE_URL is required")
-	}
-	if cfg.HiveServiceURL == "" {
-		return nil, fmt.Errorf("config: HIVE_SERVICE_URL is required")
 	}
 
 	return cfg, nil

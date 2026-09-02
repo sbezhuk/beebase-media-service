@@ -1,7 +1,8 @@
 // Package media implements the media use cases: upload, get metadata,
 // download content, list, and delete. It depends only on the domain/media
-// port and the ApiaryVerifier/HiveVerifier ports declared in this
-// package, never on HTTP or PostgreSQL directly.
+// port, never on HTTP or PostgreSQL directly - and, unlike most other
+// services in this project, never on another service either: it has no
+// notion of apiaries or hives at all.
 package media
 
 import (
@@ -17,6 +18,26 @@ import (
 	"github.com/sbezhuk/beebase-common/pagination"
 	"github.com/sbezhuk/beebase-media-service/internal/domain/media"
 )
+
+// maxListIDs bounds how many ids a single GET /media?ids= (or DELETE
+// /media?ids=) call may request, mirroring pagination.MaxLimit's role of
+// capping the size of any one collection response.
+const maxListIDs = pagination.MaxLimit
+
+// dedupeIDs returns ids with duplicates removed, preserving first-seen
+// order.
+func dedupeIDs(ids []uuid.UUID) []uuid.UUID {
+	dedup := make([]uuid.UUID, 0, len(ids))
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		dedup = append(dedup, id)
+	}
+	return dedup
+}
 
 // allowedType describes one accepted file extension: the canonical MIME
 // type this service stores and serves for it (never the client's raw
@@ -79,20 +100,19 @@ func canonicalContentType(filename string, content []byte) (string, error) {
 // which enforces ownership at the query level.
 type Service struct {
 	media              media.Repository
-	apiaries           ApiaryVerifier
-	hives              HiveVerifier
 	maxUploadSizeBytes int64
 }
 
 // NewService constructs a Service. maxUploadSizeBytes bounds the size of
 // UploadInput.Content that Upload will accept.
-func NewService(repo media.Repository, apiaries ApiaryVerifier, hives HiveVerifier, maxUploadSizeBytes int64) *Service {
-	return &Service{media: repo, apiaries: apiaries, hives: hives, maxUploadSizeBytes: maxUploadSizeBytes}
+func NewService(repo media.Repository, maxUploadSizeBytes int64) *Service {
+	return &Service{media: repo, maxUploadSizeBytes: maxUploadSizeBytes}
 }
 
-// Upload validates and stores a new file, owned by in.UserID and
-// unattached to anything - the caller doesn't need to own (or even
-// specify) an apiary/hive yet. Attach links it to one afterward.
+// Upload validates and stores a new file, owned by in.UserID. Whether
+// (and where) it ends up referenced by an apiary or hive is entirely
+// apiary-service's/hive-service's own concern - this service never
+// learns about it.
 //
 // If in.ClientMediaID is set and already identifies media owned by the
 // caller, Upload treats the call as a retried, already-completed upload:
@@ -139,49 +159,44 @@ func (s *Service) Get(ctx context.Context, userID, mediaID uuid.UUID) (*media.Me
 	return s.media.GetByID(ctx, userID, mediaID)
 }
 
-// Attach links the caller's own media item to an apiary or hive
-// (whichever in.OwnerType selects), after confirming with apiary-service
-// or hive-service that the caller owns that entity. It's idempotent:
-// attaching a media item that's already linked to the same owner
-// succeeds without error, so a retried request after a network failure
-// is safe. Attaching media already linked to a *different* owner fails
-// with media.ErrAlreadyAttached - a media item's owner is fixed the first
-// time it's attached and can't be moved.
-func (s *Service) Attach(ctx context.Context, in AttachInput) (*media.Media, error) {
-	switch in.OwnerType {
-	case media.OwnerTypeApiary:
-		if err := s.apiaries.Verify(ctx, in.AccessToken, in.OwnerID); err != nil {
-			return nil, err
-		}
-	case media.OwnerTypeHive:
-		if err := s.hives.Verify(ctx, in.AccessToken, in.OwnerID); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, ErrInvalidOwnerType
-	}
-
-	m, err := s.media.Attach(ctx, in.UserID, in.MediaID, in.OwnerType, in.OwnerID)
-	if err != nil {
-		if errors.Is(err, media.ErrNotFound) || errors.Is(err, media.ErrAlreadyAttached) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("media: attach: %w", err)
-	}
-
-	return m, nil
-}
-
 // Download returns the media's metadata alongside its raw file content,
 // if it belongs to userID.
 func (s *Service) Download(ctx context.Context, userID, mediaID uuid.UUID) (*media.Media, []byte, error) {
 	return s.media.GetContent(ctx, userID, mediaID)
 }
 
-// List returns the page of media described by p, attached to ownerID of
-// type ownerType, out of every such media belonging to userID.
-func (s *Service) List(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID, p pagination.Params) ([]*media.Media, int, error) {
-	return s.media.ListByOwner(ctx, userID, ownerType, ownerID, p)
+// List returns every media item in ids that belongs to userID, in the same
+// order as the (de-duplicated) ids given - the ones that don't exist, are
+// already deleted, or belong to someone else are simply absent from the
+// result, never an error. An empty ids returns an empty slice.
+func (s *Service) List(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*media.Media, error) {
+	dedup := dedupeIDs(ids)
+
+	if len(dedup) == 0 {
+		return []*media.Media{}, nil
+	}
+	if len(dedup) > maxListIDs {
+		return nil, ErrTooManyIDs
+	}
+
+	found, err := s.media.ListByIDs(ctx, userID, dedup)
+	if err != nil {
+		return nil, fmt.Errorf("media: list by ids: %w", err)
+	}
+
+	byID := make(map[uuid.UUID]*media.Media, len(found))
+	for _, m := range found {
+		byID[m.ID] = m
+	}
+
+	ordered := make([]*media.Media, 0, len(found))
+	for _, id := range dedup {
+		if m, ok := byID[id]; ok {
+			ordered = append(ordered, m)
+		}
+	}
+
+	return ordered, nil
 }
 
 // Delete deletes the media identified by mediaID, if it belongs to userID.
@@ -189,9 +204,20 @@ func (s *Service) Delete(ctx context.Context, userID, mediaID uuid.UUID) error {
 	return s.media.Delete(ctx, userID, mediaID)
 }
 
-// DeleteByOwner hard-deletes every media item attached to ownerID of type
-// ownerType, belonging to userID. Used when an ancestor entity (a hive or
-// an apiary) is itself being cascade-deleted.
-func (s *Service) DeleteByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error) {
-	return s.media.DeleteByOwner(ctx, userID, ownerType, ownerID)
+// DeleteByIDs hard-deletes every media item in ids belonging to userID.
+// Used by apiary-service/hive-service to cascade a delete across every
+// media id an apiary/hive itself knows it references (its own Images).
+// ids beyond maxListIDs is rejected the same way List's are - the
+// deleting service already knows its exact, locally-stored id list, so a
+// caller can never legitimately need more than that in one call.
+func (s *Service) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error) {
+	dedup := dedupeIDs(ids)
+	if len(dedup) == 0 {
+		return 0, nil
+	}
+	if len(dedup) > maxListIDs {
+		return 0, ErrTooManyIDs
+	}
+
+	return s.media.DeleteByIDs(ctx, userID, dedup)
 }

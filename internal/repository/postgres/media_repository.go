@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/sbezhuk/beebase-common/pagination"
 	"github.com/sbezhuk/beebase-media-service/internal/domain/media"
 )
 
@@ -52,11 +51,11 @@ func (r *MediaRepository) Create(ctx context.Context, m *media.Media, content []
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	const insertMedia = `
-		INSERT INTO media (id, user_id, owner_type, owner_id, original_filename, content_type, size_bytes, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO media (id, user_id, original_filename, content_type, size_bytes, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 	_, err = tx.Exec(ctx, insertMedia,
-		m.ID, m.UserID, m.OwnerType, m.OwnerID, m.OriginalFilename, m.ContentType, m.SizeBytes, m.Status, m.CreatedAt, m.UpdatedAt,
+		m.ID, m.UserID, m.OriginalFilename, m.ContentType, m.SizeBytes, m.Status, m.CreatedAt, m.UpdatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -81,47 +80,16 @@ func (r *MediaRepository) Create(ctx context.Context, m *media.Media, content []
 	return nil
 }
 
-// Attach implements domain/media.Repository.
-func (r *MediaRepository) Attach(ctx context.Context, userID, mediaID uuid.UUID, ownerType string, ownerID uuid.UUID) (*media.Media, error) {
-	const q = `
-		UPDATE media
-		SET owner_type = $1, owner_id = $2, updated_at = now()
-		WHERE id = $3 AND user_id = $4 AND deleted_at IS NULL AND owner_type IS NULL
-	`
-
-	tag, err := r.db.Exec(ctx, q, ownerType, ownerID, mediaID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: attach media: %w", err)
-	}
-	if tag.RowsAffected() == 1 {
-		return r.GetByID(ctx, userID, mediaID)
-	}
-
-	// Nothing was updated: mediaID might not exist or not belong to
-	// userID (GetByID reports ErrNotFound for both, indistinguishably),
-	// or it might already be attached - either to this same owner
-	// already (idempotent success) or to a different one
-	// (ErrAlreadyAttached).
-	m, err := r.GetByID(ctx, userID, mediaID)
-	if err != nil {
-		return nil, err
-	}
-	if m.OwnerType != nil && *m.OwnerType == ownerType && m.OwnerID != nil && *m.OwnerID == ownerID {
-		return m, nil
-	}
-	return nil, media.ErrAlreadyAttached
-}
-
 func (r *MediaRepository) GetByID(ctx context.Context, userID, mediaID uuid.UUID) (*media.Media, error) {
 	const q = `
-		SELECT id, user_id, owner_type, owner_id, original_filename, content_type, size_bytes, status, created_at, updated_at, deleted_at
+		SELECT id, user_id, original_filename, content_type, size_bytes, status, created_at, updated_at, deleted_at
 		FROM media
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 	`
 
 	var m media.Media
 	err := r.db.QueryRow(ctx, q, mediaID, userID).Scan(
-		&m.ID, &m.UserID, &m.OwnerType, &m.OwnerID, &m.OriginalFilename, &m.ContentType, &m.SizeBytes, &m.Status, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
+		&m.ID, &m.UserID, &m.OriginalFilename, &m.ContentType, &m.SizeBytes, &m.Status, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -162,45 +130,39 @@ func (r *MediaRepository) GetContent(ctx context.Context, userID, mediaID uuid.U
 	return m, content, nil
 }
 
-func (r *MediaRepository) ListByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID, p pagination.Params) ([]*media.Media, int, error) {
-	const countQ = `
-		SELECT count(*)
-		FROM media
-		WHERE user_id = $1 AND owner_type = $2 AND owner_id = $3 AND deleted_at IS NULL
-	`
-
-	var total int
-	if err := r.db.QueryRow(ctx, countQ, userID, ownerType, ownerID).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("postgres: count media: %w", err)
+// ListByIDs implements domain/media.Repository with a single query against
+// every id in ids at once, scoped to userID exactly like every other method
+// here.
+func (r *MediaRepository) ListByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*media.Media, error) {
+	if len(ids) == 0 {
+		return []*media.Media{}, nil
 	}
 
 	const q = `
-		SELECT id, user_id, owner_type, owner_id, original_filename, content_type, size_bytes, status, created_at, updated_at, deleted_at
+		SELECT id, user_id, original_filename, content_type, size_bytes, status, created_at, updated_at, deleted_at
 		FROM media
-		WHERE user_id = $1 AND owner_type = $2 AND owner_id = $3 AND deleted_at IS NULL
-		ORDER BY created_at ASC, id ASC
-		LIMIT $4 OFFSET $5
+		WHERE user_id = $1 AND id = ANY($2) AND deleted_at IS NULL
 	`
 
-	rows, err := r.db.Query(ctx, q, userID, ownerType, ownerID, p.Limit, p.Offset())
+	rows, err := r.db.Query(ctx, q, userID, ids)
 	if err != nil {
-		return nil, 0, fmt.Errorf("postgres: list media: %w", err)
+		return nil, fmt.Errorf("postgres: list media by ids: %w", err)
 	}
 	defer rows.Close()
 
 	items := []*media.Media{}
 	for rows.Next() {
 		var m media.Media
-		if err := rows.Scan(&m.ID, &m.UserID, &m.OwnerType, &m.OwnerID, &m.OriginalFilename, &m.ContentType, &m.SizeBytes, &m.Status, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt); err != nil {
-			return nil, 0, fmt.Errorf("postgres: scan media: %w", err)
+		if err := rows.Scan(&m.ID, &m.UserID, &m.OriginalFilename, &m.ContentType, &m.SizeBytes, &m.Status, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt); err != nil {
+			return nil, fmt.Errorf("postgres: scan media: %w", err)
 		}
 		items = append(items, &m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("postgres: list media: %w", err)
+		return nil, fmt.Errorf("postgres: list media by ids: %w", err)
 	}
 
-	return items, total, nil
+	return items, nil
 }
 
 // Delete soft-deletes the media row and hard-deletes its blob in one
@@ -239,16 +201,20 @@ func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID)
 	return nil
 }
 
-// DeleteByOwner hard-deletes every media row for ownerType/ownerID/userID
-// in one statement. No transaction is needed here (unlike Delete): the
+// DeleteByIDs hard-deletes every row in ids belonging to userID in one
+// statement. No transaction is needed here (unlike Delete): the
 // media_blobs FK is ON DELETE CASCADE, so each row's blob is removed
 // automatically as part of the same DELETE.
-func (r *MediaRepository) DeleteByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error) {
-	const q = `DELETE FROM media WHERE owner_type = $1 AND owner_id = $2 AND user_id = $3`
+func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
 
-	tag, err := r.db.Exec(ctx, q, ownerType, ownerID, userID)
+	const q = `DELETE FROM media WHERE id = ANY($1) AND user_id = $2`
+
+	tag, err := r.db.Exec(ctx, q, ids, userID)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: delete media by owner: %w", err)
+		return 0, fmt.Errorf("postgres: delete media by ids: %w", err)
 	}
 
 	return tag.RowsAffected(), nil

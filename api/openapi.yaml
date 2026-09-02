@@ -9,18 +9,14 @@ info:
     trusts a userID from anywhere but a verified token.
 
     A file (photo, PDF, XML, or other document) is uploaded on its own,
-    owned only by the caller - no apiary or hive needs to exist yet, and
-    upload never checks apiary/hive ownership. It optionally attaches to
-    exactly one owning entity in another service (currently an apiary or a
-    hive) via a separate attach call once one does. Attaching requires
-    that the caller own the referenced owner; this service confirms that
-    by forwarding the caller's own access token to apiary-service's or
-    hive-service's GET /api/v1/{apiaries,hives}/{id} and trusting its
-    answer - it never queries apiary or hive ownership itself, and never
-    embeds Apiary/Hive-specific logic: owner_type and owner_id are generic
-    so the same infrastructure can support future entity types without a
-    schema change. A media item's owner is fixed the first time it's
-    attached and can never be moved or cleared afterward.
+    owned only by the caller. This service has no notion of an owning
+    apiary or hive at all - it never queries, verifies, or even knows
+    those exist. Which apiary/hive (if any) a media id is associated with
+    is tracked entirely by apiary-service/hive-service themselves, in
+    their own `images` field; this service's only job is storing files
+    and handing them back by id, scoped to whoever uploaded them. A
+    client extracts the ids it cares about from an apiary/hive response
+    and passes them to GET /api/v1/media?ids= to resolve them.
 
     Storage note (MVP): file bytes are stored directly in PostgreSQL,
     gzip-compressed where that helps, rather than in a separate object
@@ -35,7 +31,7 @@ tags:
   - name: system
     description: Liveness and readiness probes.
   - name: media
-    description: Upload, retrieve, download, list, and delete files attached to an apiary or a hive.
+    description: Upload, retrieve, download, list, and delete files.
 
 security:
   - bearerAuth: []
@@ -75,13 +71,15 @@ paths:
   /api/v1/media:
     post:
       tags: [media]
-      summary: Upload a file, owned by the caller and not yet attached to anything
+      summary: Upload a file, owned by the caller
       description: >
-        multipart/form-data. No apiary or hive needs to exist yet - use
-        POST /media/{mediaId}/attach afterward to link the upload to one.
-        The server never trusts the client's declared file type: the
-        extension is checked against an allowlist and, where reliably
-        sniffable, cross-checked against the file's actual bytes.
+        multipart/form-data. No apiary or hive needs to exist yet - upload
+        is entirely standalone. Once you have the returned id, reference
+        it in `images` on `POST`/`PUT /apiaries` or `/hives` (see those
+        services' own OpenAPI specs) to associate it with one. The server
+        never trusts the client's declared file type: the extension is
+        checked against an allowlist and, where reliably sniffable,
+        cross-checked against the file's actual bytes.
 
         media_id is an optional client-generated idempotency key: retrying
         the same upload (e.g. after a network failure) with the same
@@ -132,43 +130,83 @@ paths:
 
     get:
       tags: [media]
-      summary: List the authenticated user's files attached to one owner
+      summary: Get the authenticated user's files by id
       description: >
-        Returns only files owned by the caller and attached to the given
-        owner_type/owner_id - never another user's - as a page of results.
-        Omitting page/limit falls back to page=1, limit=20.
+        Returns only files owned by the caller among the given ids - never
+        another user's. `ids` is the only filter this endpoint accepts (no
+        page/limit): a client that wants "every photo attached to this
+        apiary/hive" gets the id list from the apiary/hive's own `images`
+        field and passes it here.
+
+        An id that doesn't exist, is already deleted, or belongs to a
+        different user is simply absent from the result - never an error.
+        Duplicate ids collapse to one result. An empty (or omitted) `ids`
+        returns an empty list. Where technically possible, results are
+        returned in the same order as the (de-duplicated) requested ids.
+        At most 100 distinct ids may be requested at once.
       parameters:
-        - name: owner_type
+        - name: ids
           in: query
-          required: true
-          schema: { type: string, enum: [apiary, hive] }
-        - name: owner_id
-          in: query
-          required: true
-          schema: { type: string, format: uuid }
-        - name: page
-          in: query
-          description: 1-indexed page number.
-          schema: { type: integer, minimum: 1, default: 1 }
-        - name: limit
-          in: query
-          description: Rows per page.
-          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+          description: Repeat to request multiple ids, e.g. ?ids=<id1>&ids=<id2>.
+          schema:
+            type: array
+            items: { type: string, format: uuid }
       responses:
         "200":
-          description: A page of the caller's files attached to the given owner.
+          description: The caller's files among the requested ids.
           content:
             application/json:
               schema:
                 type: object
-                required: [items, pagination]
+                required: [items]
                 properties:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/MediaResponse" }
-                  pagination: { $ref: "#/components/schemas/Pagination" }
         "400":
-          description: owner_type, owner_id, page, or limit is missing or invalid.
+          description: An id is not a valid UUID, or more than 100 distinct ids were requested.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    delete:
+      tags: [media]
+      summary: Bulk-delete files by id
+      description: >
+        **Internal only** - beebase-gateway blocks this exact method+path
+        from every external caller (a 404, indistinguishable from a route
+        that doesn't exist), so it is never reachable from outside the
+        cluster. It exists purely as a service-to-service call:
+        apiary-service and hive-service call it directly against
+        media-service (bypassing the gateway) when an apiary/hive is
+        itself being deleted, to hard-delete every media id it knows it
+        references (its own `images`). Documented here because it's still
+        a real, load-bearing part of media-service's HTTP surface those
+        services depend on, even though no external client can or should
+        call it directly.
+
+        Same `ids` semantics as the GET above (repeat the query param,
+        scoped to the caller, at most 100 distinct ids). An id that
+        doesn't exist, was already deleted, or belongs to a different
+        user is simply not counted - a zero count is a normal outcome,
+        not an error, so this is always safe to retry.
+      parameters:
+        - name: ids
+          in: query
+          description: Repeat to request multiple ids, e.g. ?ids=<id1>&ids=<id2>.
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Every requested id belonging to the caller is now deleted (or already was).
+        "400":
+          description: An id is not a valid UUID, or more than 100 distinct ids were requested.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
@@ -191,8 +229,7 @@ paths:
       description: >
         Returns 404 both when mediaId doesn't exist and when it belongs to
         a different user - the two cases are indistinguishable to the
-        caller, by design. owner_type/owner_id are null until the file is
-        attached to something (see POST /media/{mediaId}/attach).
+        caller, by design.
       responses:
         "200":
           description: The file's metadata.
@@ -236,60 +273,6 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "404":
           description: No such file, or it belongs to a different user.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-
-  /api/v1/media/{mediaId}/attach:
-    parameters:
-      - name: mediaId
-        in: path
-        required: true
-        schema: { type: string, format: uuid }
-
-    post:
-      tags: [media]
-      summary: Link an uploaded file to an apiary or a hive the caller owns
-      description: >
-        Rejected with 404 apiary_not_found / hive_not_found if owner_id
-        doesn't exist or doesn't belong to the caller - verified live
-        against apiary-service/hive-service, not trusted from the request.
-
-        Idempotent: calling it again with the same owner_type/owner_id
-        succeeds without error (200), so a retry after a network failure
-        is safe. A media item's owner is fixed the first time it's
-        attached and can never be moved - attaching media that's already
-        linked to a *different* owner fails with 409 already_attached.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/AttachMediaRequest" }
-      responses:
-        "200":
-          description: The file is now attached to owner_type/owner_id (or already was).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/MediaResponse" }
-        "400":
-          description: mediaId is not a valid UUID, or the request failed validation.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
-        "401":
-          description: Missing, invalid, or expired access token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "404":
-          description: >
-            mediaId doesn't exist or belongs to a different user, or
-            owner_id doesn't exist or belongs to a different user.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "409":
-          description: mediaId is already attached to a different owner.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -356,51 +339,16 @@ components:
           type: string
           format: binary
 
-    AttachMediaRequest:
-      type: object
-      required: [owner_type, owner_id]
-      properties:
-        owner_type:
-          type: string
-          enum: [apiary, hive]
-          description: The type of entity this file attaches to.
-        owner_id:
-          type: string
-          format: uuid
-          description: Must be an apiary or hive (per owner_type) owned by the caller.
-
     MediaResponse:
       type: object
       properties:
         id: { type: string, format: uuid }
-        owner_type:
-          type: string
-          enum: [apiary, hive]
-          nullable: true
-          description: Null until the file is attached to something.
-        owner_id:
-          type: string
-          format: uuid
-          nullable: true
-          description: Null until the file is attached to something.
         original_filename: { type: string }
         content_type: { type: string, example: image/jpeg }
         size_bytes: { type: integer, format: int64 }
         status: { type: string, enum: [available] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-
-    Pagination:
-      type: object
-      description: Metadata describing the requested page relative to the full result set.
-      required: [page, limit, total, total_pages, has_next, has_previous]
-      properties:
-        page: { type: integer, example: 1 }
-        limit: { type: integer, example: 20 }
-        total: { type: integer, description: Total matching rows across all pages., example: 12 }
-        total_pages: { type: integer, example: 1 }
-        has_next: { type: boolean }
-        has_previous: { type: boolean }
 
     ErrorResponse:
       type: object
@@ -417,14 +365,10 @@ components:
               enum:
                 - media_not_found
                 - invalid_media_id
-                - apiary_not_found
-                - hive_not_found
-                - invalid_owner_type
                 - unsupported_file_type
                 - file_too_large
                 - media_id_conflict
                 - file_required
-                - already_attached
                 - missing_authorization
                 - invalid_access_token
                 - invalid_body
@@ -448,11 +392,7 @@ components:
               additionalProperties:
                 type: string
                 enum:
-                  - owner_type_required
-                  - owner_type_invalid
-                  - owner_id_required
-                  - owner_id_invalid
                   - media_id_invalid
-                  - invalid_page
-                  - invalid_limit
-              example: { owner_type: "owner_type_invalid" }
+                  - ids_invalid
+                  - ids_too_many
+              example: { ids: "ids_invalid" }

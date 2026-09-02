@@ -13,8 +13,6 @@ import (
 
 	appmedia "github.com/sbezhuk/beebase-media-service/internal/application/media"
 	"github.com/sbezhuk/beebase-media-service/internal/config"
-	"github.com/sbezhuk/beebase-media-service/internal/platform/apiaryclient"
-	"github.com/sbezhuk/beebase-media-service/internal/platform/hiveclient"
 	"github.com/sbezhuk/beebase-media-service/internal/platform/postgres"
 	repopostgres "github.com/sbezhuk/beebase-media-service/internal/repository/postgres"
 	transporthttp "github.com/sbezhuk/beebase-media-service/internal/transport/http"
@@ -66,9 +64,7 @@ func run() error {
 	}
 
 	mediaRepo := repopostgres.NewMediaRepository(db)
-	apiaryVerifier := apiaryclient.New(cfg.ApiaryServiceURL)
-	hiveVerifier := hiveclient.New(cfg.HiveServiceURL)
-	mediaService := appmedia.NewService(mediaRepo, apiaryVerifier, hiveVerifier, cfg.MaxUploadSizeBytes)
+	mediaService := appmedia.NewService(mediaRepo, cfg.MaxUploadSizeBytes)
 	mediaHandler := mediahttp.NewHandler(mediaService, log, cfg.MaxUploadSizeBytes)
 
 	router := transporthttp.NewRouter(log, db, mediaHandler, verifier)

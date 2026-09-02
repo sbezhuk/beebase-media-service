@@ -27,17 +27,3 @@ type UploadResult struct {
 	// new one - the caller should respond 200, not 201.
 	AlreadyExisted bool
 }
-
-// AttachInput is the input to Service.Attach.
-type AttachInput struct {
-	UserID uuid.UUID
-	// AccessToken is the caller's own access token, forwarded to
-	// apiary-service or hive-service so it can run its own, identical
-	// ownership check rather than this service trusting a client-supplied
-	// user/owner pairing.
-	AccessToken string
-
-	MediaID   uuid.UUID
-	OwnerType string // media.OwnerTypeApiary | media.OwnerTypeHive
-	OwnerID   uuid.UUID
-}

@@ -53,27 +53,6 @@ func (f *fakeRepo) GetByID(_ context.Context, userID, mediaID uuid.UUID) (*media
 	return &cp, nil
 }
 
-func (f *fakeRepo) Attach(_ context.Context, userID, mediaID uuid.UUID, ownerType string, ownerID uuid.UUID) (*media.Media, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	s, ok := f.byID[mediaID]
-	if !ok || s.m.UserID != userID || s.m.DeletedAt != nil {
-		return nil, media.ErrNotFound
-	}
-	if s.m.OwnerType != nil {
-		if *s.m.OwnerType == ownerType && s.m.OwnerID != nil && *s.m.OwnerID == ownerID {
-			cp := s.m
-			return &cp, nil // idempotent replay
-		}
-		return nil, media.ErrAlreadyAttached
-	}
-	ot, oid := ownerType, ownerID
-	s.m.OwnerType = &ot
-	s.m.OwnerID = &oid
-	cp := s.m
-	return &cp, nil
-}
-
 func (f *fakeRepo) GetContent(_ context.Context, userID, mediaID uuid.UUID) (*media.Media, []byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -86,13 +65,16 @@ func (f *fakeRepo) GetContent(_ context.Context, userID, mediaID uuid.UUID) (*me
 	return &cp, cc, nil
 }
 
-func (f *fakeRepo) ListByOwner(_ context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID, p pagination.Params) ([]*media.Media, int, error) {
+func (f *fakeRepo) ListByIDs(_ context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*media.Media, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	idSet := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
 	var all []*media.Media
 	for _, s := range f.byID {
-		if s.m.UserID == userID && s.m.OwnerType != nil && *s.m.OwnerType == ownerType &&
-			s.m.OwnerID != nil && *s.m.OwnerID == ownerID && s.m.DeletedAt == nil {
+		if idSet[s.m.ID] && s.m.UserID == userID && s.m.DeletedAt == nil {
 			cp := s.m
 			all = append(all, &cp)
 		}
@@ -104,17 +86,7 @@ func (f *fakeRepo) ListByOwner(_ context.Context, userID uuid.UUID, ownerType st
 		return all[i].ID.String() < all[j].ID.String()
 	})
 
-	total := len(all)
-	start := p.Offset()
-	if start > total {
-		start = total
-	}
-	end := start + p.Limit
-	if end > total {
-		end = total
-	}
-
-	return all[start:end], total, nil
+	return all, nil
 }
 
 func (f *fakeRepo) Delete(_ context.Context, userID, mediaID uuid.UUID) error {
@@ -130,62 +102,21 @@ func (f *fakeRepo) Delete(_ context.Context, userID, mediaID uuid.UUID) error {
 	return nil
 }
 
-func (f *fakeRepo) DeleteByOwner(_ context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error) {
+func (f *fakeRepo) DeleteByIDs(_ context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	idSet := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
 	var count int64
 	for id, s := range f.byID {
-		if s.m.UserID == userID && s.m.OwnerType != nil && *s.m.OwnerType == ownerType &&
-			s.m.OwnerID != nil && *s.m.OwnerID == ownerID {
+		if idSet[id] && s.m.UserID == userID {
 			delete(f.byID, id)
 			count++
 		}
 	}
 	return count, nil
-}
-
-// --- fake apiary/hive verifiers ---
-
-// fakeApiaryVerifier simulates apiary-service: a set of (token, apiaryID)
-// pairs are "owned", everything else is rejected exactly like a 404 from
-// the real service would be.
-type fakeApiaryVerifier struct {
-	owned map[string]uuid.UUID
-}
-
-func newFakeApiaryVerifier() *fakeApiaryVerifier {
-	return &fakeApiaryVerifier{owned: map[string]uuid.UUID{}}
-}
-
-func (f *fakeApiaryVerifier) allow(token string, apiaryID uuid.UUID) {
-	f.owned[token] = apiaryID
-}
-
-func (f *fakeApiaryVerifier) Verify(_ context.Context, accessToken string, apiaryID uuid.UUID) error {
-	if owned, ok := f.owned[accessToken]; ok && owned == apiaryID {
-		return nil
-	}
-	return appmedia.ErrApiaryNotFound
-}
-
-// fakeHiveVerifier is the hive equivalent of fakeApiaryVerifier.
-type fakeHiveVerifier struct {
-	owned map[string]uuid.UUID
-}
-
-func newFakeHiveVerifier() *fakeHiveVerifier {
-	return &fakeHiveVerifier{owned: map[string]uuid.UUID{}}
-}
-
-func (f *fakeHiveVerifier) allow(token string, hiveID uuid.UUID) {
-	f.owned[token] = hiveID
-}
-
-func (f *fakeHiveVerifier) Verify(_ context.Context, accessToken string, hiveID uuid.UUID) error {
-	if owned, ok := f.owned[accessToken]; ok && owned == hiveID {
-		return nil
-	}
-	return appmedia.ErrHiveNotFound
 }
 
 // --- test fixtures ---
@@ -194,14 +125,12 @@ const maxUploadSizeBytes = 1 << 20 // 1MB, plenty for these tests
 
 var jpegBytes = append([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}, make([]byte, 32)...)
 
-var pdfBytes = append([]byte("%PDF-1.4\n"), make([]byte, 32)...)
-
-func newService(repo *fakeRepo, apiaries *fakeApiaryVerifier, hives *fakeHiveVerifier) *appmedia.Service {
-	return appmedia.NewService(repo, apiaries, hives, maxUploadSizeBytes)
+func newService(repo *fakeRepo) *appmedia.Service {
+	return appmedia.NewService(repo, maxUploadSizeBytes)
 }
 
-// upload is a small helper for the many tests that just need a fresh,
-// unattached media row belonging to userID.
+// upload is a small helper for the many tests that just need a fresh
+// media row belonging to userID.
 func upload(t *testing.T, svc *appmedia.Service, userID uuid.UUID, filename string, content []byte) *appmedia.UploadResult {
 	t.Helper()
 	result, err := svc.Upload(context.Background(), appmedia.UploadInput{
@@ -213,32 +142,15 @@ func upload(t *testing.T, svc *appmedia.Service, userID uuid.UUID, filename stri
 	return result
 }
 
-// uploadAndAttach uploads a fresh media row and immediately attaches it,
-// for the tests that need already-attached media as a fixture.
-func uploadAndAttach(t *testing.T, svc *appmedia.Service, userID uuid.UUID, token, ownerType string, ownerID uuid.UUID, filename string, content []byte) *media.Media {
-	t.Helper()
-	result := upload(t, svc, userID, filename, content)
-	m, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: token, MediaID: result.Media.ID, OwnerType: ownerType, OwnerID: ownerID,
-	})
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-	return m
-}
-
 // --- Upload tests ---
 
 func TestUpload_Success(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
 
 	result := upload(t, svc, userID, "hive1.jpg", jpegBytes)
 	if result.AlreadyExisted {
 		t.Errorf("AlreadyExisted = true on a fresh upload")
-	}
-	if result.Media.IsAttached() {
-		t.Errorf("a fresh upload should be unattached, got owner_type=%v owner_id=%v", result.Media.OwnerType, result.Media.OwnerID)
 	}
 	if result.Media.ContentType != "image/jpeg" {
 		t.Errorf("ContentType = %q, want image/jpeg", result.Media.ContentType)
@@ -246,7 +158,7 @@ func TestUpload_Success(t *testing.T) {
 }
 
 func TestUpload_UnsupportedExtension(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 
 	_, err := svc.Upload(context.Background(), appmedia.UploadInput{
 		UserID:           uuid.New(),
@@ -263,7 +175,7 @@ func TestUpload_UnsupportedExtension(t *testing.T) {
 // match what the extension implies is rejected, exactly as if the client
 // had spoofed it.
 func TestUpload_ExtensionContentTypeMismatchIsRejected(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 
 	_, err := svc.Upload(context.Background(), appmedia.UploadInput{
 		UserID:           uuid.New(),
@@ -276,7 +188,7 @@ func TestUpload_ExtensionContentTypeMismatchIsRejected(t *testing.T) {
 }
 
 func TestUpload_ExceedsMaxSize(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 
 	_, err := svc.Upload(context.Background(), appmedia.UploadInput{
 		UserID:           uuid.New(),
@@ -289,7 +201,7 @@ func TestUpload_ExceedsMaxSize(t *testing.T) {
 }
 
 func TestUpload_IdempotentReplay_SameMediaID(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
 	clientID := uuid.New()
 
@@ -321,7 +233,7 @@ func TestUpload_IdempotentReplay_SameMediaID(t *testing.T) {
 }
 
 func TestUpload_ClientMediaIDConflict_BelongsToAnotherUser(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	owner := uuid.New()
 	attacker := uuid.New()
 	clientID := uuid.New()
@@ -341,191 +253,10 @@ func TestUpload_ClientMediaIDConflict_BelongsToAnotherUser(t *testing.T) {
 	}
 }
 
-// --- Attach tests ---
-
-func TestAttach_Success_Apiary(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
-	userID := uuid.New()
-	apiaryID := uuid.New()
-	token := "user-token"
-	apiaries.allow(token, apiaryID)
-
-	result := upload(t, svc, userID, "f.jpg", jpegBytes)
-
-	m, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: token, MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeApiary, OwnerID: apiaryID,
-	})
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-	if m.OwnerType == nil || *m.OwnerType != media.OwnerTypeApiary || m.OwnerID == nil || *m.OwnerID != apiaryID {
-		t.Errorf("Attach result owner = %v/%v, want apiary/%s", m.OwnerType, m.OwnerID, apiaryID)
-	}
-}
-
-func TestAttach_Success_Hive(t *testing.T) {
-	hives := newFakeHiveVerifier()
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), hives)
-	userID := uuid.New()
-	hiveID := uuid.New()
-	token := "user-token"
-	hives.allow(token, hiveID)
-
-	result := upload(t, svc, userID, "inspection.pdf", pdfBytes)
-
-	m, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: token, MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeHive, OwnerID: hiveID,
-	})
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-	if m.OwnerType == nil || *m.OwnerType != media.OwnerTypeHive || m.OwnerID == nil || *m.OwnerID != hiveID {
-		t.Errorf("Attach result owner = %v/%v, want hive/%s", m.OwnerType, m.OwnerID, hiveID)
-	}
-}
-
-func TestAttach_InvalidOwnerType(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
-	userID := uuid.New()
-	result := upload(t, svc, userID, "f.jpg", jpegBytes)
-
-	_, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, MediaID: result.Media.ID, OwnerType: "hive_box", OwnerID: uuid.New(),
-	})
-	if !errors.Is(err, appmedia.ErrInvalidOwnerType) {
-		t.Fatalf("Attach with bad owner_type: got %v, want ErrInvalidOwnerType", err)
-	}
-}
-
-// TestAttach_ApiaryNotOwnedByCaller is the core cross-service security
-// guarantee: a file can't be attached to an apiary the caller doesn't
-// own, even if they know its ID.
-func TestAttach_ApiaryNotOwnedByCaller(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
-	userID := uuid.New()
-	result := upload(t, svc, userID, "f.jpg", jpegBytes)
-
-	_, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: "attacker-token", MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeApiary, OwnerID: uuid.New(),
-	})
-	if !errors.Is(err, appmedia.ErrApiaryNotFound) {
-		t.Fatalf("Attach to unowned apiary: got %v, want ErrApiaryNotFound", err)
-	}
-}
-
-func TestAttach_HiveNotOwnedByCaller(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
-	userID := uuid.New()
-	result := upload(t, svc, userID, "f.pdf", pdfBytes)
-
-	_, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: "attacker-token", MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeHive, OwnerID: uuid.New(),
-	})
-	if !errors.Is(err, appmedia.ErrHiveNotFound) {
-		t.Fatalf("Attach to unowned hive: got %v, want ErrHiveNotFound", err)
-	}
-}
-
-func TestAttach_MediaNotFound(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
-	apiaryID := uuid.New()
-	token := "token"
-	apiaries.allow(token, apiaryID)
-
-	_, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: uuid.New(), AccessToken: token, MediaID: uuid.New(),
-		OwnerType: media.OwnerTypeApiary, OwnerID: apiaryID,
-	})
-	if !errors.Is(err, media.ErrNotFound) {
-		t.Fatalf("Attach with unknown media id: got %v, want ErrNotFound", err)
-	}
-}
-
-func TestAttach_WrongUser_ReturnsNotFound(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
-	owner := uuid.New()
-	other := uuid.New()
-	apiaryID := uuid.New()
-	token := "token"
-	apiaries.allow(token, apiaryID)
-
-	result := upload(t, svc, owner, "f.jpg", jpegBytes)
-
-	_, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: other, AccessToken: token, MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeApiary, OwnerID: apiaryID,
-	})
-	if !errors.Is(err, media.ErrNotFound) {
-		t.Fatalf("Attach by non-owner: got %v, want ErrNotFound", err)
-	}
-}
-
-// TestAttach_IdempotentReplay_SameOwner proves that retrying an Attach
-// call with the same owner (e.g. after a network failure) succeeds
-// without error, rather than being rejected as already-attached.
-func TestAttach_IdempotentReplay_SameOwner(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
-	userID := uuid.New()
-	apiaryID := uuid.New()
-	token := "token"
-	apiaries.allow(token, apiaryID)
-
-	result := upload(t, svc, userID, "f.jpg", jpegBytes)
-	in := appmedia.AttachInput{
-		UserID: userID, AccessToken: token, MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeApiary, OwnerID: apiaryID,
-	}
-
-	if _, err := svc.Attach(context.Background(), in); err != nil {
-		t.Fatalf("first Attach: %v", err)
-	}
-	if _, err := svc.Attach(context.Background(), in); err != nil {
-		t.Fatalf("retried Attach with the same owner: %v", err)
-	}
-}
-
-// TestAttach_AlreadyAttachedToDifferentOwner proves a media item's owner
-// is fixed the first time it's attached: a second Attach naming a
-// different owner is rejected, not silently moved.
-func TestAttach_AlreadyAttachedToDifferentOwner(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
-	userID := uuid.New()
-	firstApiary := uuid.New()
-	secondApiary := uuid.New()
-	token := "token"
-	apiaries.allow(token, firstApiary)
-
-	result := upload(t, svc, userID, "f.jpg", jpegBytes)
-	if _, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: token, MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeApiary, OwnerID: firstApiary,
-	}); err != nil {
-		t.Fatalf("first Attach: %v", err)
-	}
-
-	apiaries.allow(token, secondApiary)
-	_, err := svc.Attach(context.Background(), appmedia.AttachInput{
-		UserID: userID, AccessToken: token, MediaID: result.Media.ID,
-		OwnerType: media.OwnerTypeApiary, OwnerID: secondApiary,
-	})
-	if !errors.Is(err, media.ErrAlreadyAttached) {
-		t.Fatalf("re-Attach to a different apiary: got %v, want ErrAlreadyAttached", err)
-	}
-}
-
 // --- Get/Download tests ---
 
 func TestGet_Success(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
 	created := upload(t, svc, userID, "f.jpg", jpegBytes)
 
@@ -539,7 +270,7 @@ func TestGet_Success(t *testing.T) {
 }
 
 func TestGet_NotFound(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 
 	_, err := svc.Get(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, media.ErrNotFound) {
@@ -548,7 +279,7 @@ func TestGet_NotFound(t *testing.T) {
 }
 
 func TestGet_WrongOwner_ReturnsNotFound(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	owner := uuid.New()
 	other := uuid.New()
 	created := upload(t, svc, owner, "f.jpg", jpegBytes)
@@ -559,7 +290,7 @@ func TestGet_WrongOwner_ReturnsNotFound(t *testing.T) {
 }
 
 func TestDownload_Success(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
 	created := upload(t, svc, userID, "f.jpg", jpegBytes)
 
@@ -573,7 +304,7 @@ func TestDownload_Success(t *testing.T) {
 }
 
 func TestDownload_WrongOwner_ReturnsNotFound(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	owner := uuid.New()
 	other := uuid.New()
 	created := upload(t, svc, owner, "f.jpg", jpegBytes)
@@ -585,62 +316,89 @@ func TestDownload_WrongOwner_ReturnsNotFound(t *testing.T) {
 
 // --- List tests ---
 
-func TestList_ReturnsOnlyMatchingOwnerAndCaller(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
+func TestList_ReturnsOnlyCallersOwnMedia(t *testing.T) {
+	svc := newService(newFakeRepo())
 	userA := uuid.New()
 	userB := uuid.New()
-	apiaryA := uuid.New()
-	apiaryB := uuid.New()
-	tokenA := "token-a"
-	tokenB := "token-b"
-	apiaries.allow(tokenA, apiaryA)
-	apiaries.allow(tokenB, apiaryB)
 
-	for i := 0; i < 2; i++ {
-		uploadAndAttach(t, svc, userA, tokenA, media.OwnerTypeApiary, apiaryA, "a.jpg", jpegBytes)
-	}
-	uploadAndAttach(t, svc, userB, tokenB, media.OwnerTypeApiary, apiaryB, "b.jpg", jpegBytes)
+	a1 := upload(t, svc, userA, "a1.jpg", jpegBytes).Media
+	a2 := upload(t, svc, userA, "a2.jpg", jpegBytes).Media
+	b1 := upload(t, svc, userB, "b1.jpg", jpegBytes).Media
 
-	items, total, err := svc.List(context.Background(), userA, media.OwnerTypeApiary, apiaryA, pagination.Params{Page: 1, Limit: pagination.DefaultLimit})
+	items, err := svc.List(context.Background(), userA, []uuid.UUID{a1.ID, a2.ID, b1.ID})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if total != 2 || len(items) != 2 {
-		t.Fatalf("List total=%d len=%d, want 2 and 2", total, len(items))
+	if len(items) != 2 {
+		t.Fatalf("List len=%d, want 2 (userB's media must not leak into userA's result)", len(items))
 	}
 	for _, m := range items {
-		if m.UserID != userA || m.OwnerID == nil || *m.OwnerID != apiaryA {
-			t.Errorf("List leaked %+v into userA's apiaryA list", m)
+		if m.UserID != userA {
+			t.Errorf("List leaked %+v into userA's result", m)
 		}
 	}
 }
 
-func TestList_Pagination(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
+func TestList_PreservesRequestOrder(t *testing.T) {
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
-	apiaryID := uuid.New()
-	token := "token"
-	apiaries.allow(token, apiaryID)
 
-	for i := 0; i < 5; i++ {
-		uploadAndAttach(t, svc, userID, token, media.OwnerTypeApiary, apiaryID, "f.jpg", jpegBytes)
-	}
+	first := upload(t, svc, userID, "1.jpg", jpegBytes).Media
+	second := upload(t, svc, userID, "2.jpg", jpegBytes).Media
+	third := upload(t, svc, userID, "3.jpg", jpegBytes).Media
 
-	page, total, err := svc.List(context.Background(), userID, media.OwnerTypeApiary, apiaryID, pagination.Params{Page: 1, Limit: 2})
+	items, err := svc.List(context.Background(), userID, []uuid.UUID{third.ID, first.ID, second.ID})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if total != 5 || len(page) != 2 {
-		t.Fatalf("List page 1: total=%d len=%d, want 5 and 2", total, len(page))
+	if len(items) != 3 || items[0].ID != third.ID || items[1].ID != first.ID || items[2].ID != second.ID {
+		t.Fatalf("List did not preserve request order: %+v", items)
+	}
+}
+
+func TestList_UnknownAndDuplicateIDsAreOmittedOrCollapsed(t *testing.T) {
+	svc := newService(newFakeRepo())
+	userID := uuid.New()
+	m := upload(t, svc, userID, "f.jpg", jpegBytes).Media
+	unknown := uuid.New()
+
+	items, err := svc.List(context.Background(), userID, []uuid.UUID{m.ID, unknown, m.ID})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != m.ID {
+		t.Fatalf("List with an unknown id and a duplicate = %+v, want exactly one item (%s)", items, m.ID)
+	}
+}
+
+func TestList_EmptyIDsReturnsEmptySlice(t *testing.T) {
+	svc := newService(newFakeRepo())
+
+	items, err := svc.List(context.Background(), uuid.New(), nil)
+	if err != nil {
+		t.Fatalf("List with no ids: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("List with no ids = %+v, want empty", items)
+	}
+}
+
+func TestList_TooManyIDs(t *testing.T) {
+	svc := newService(newFakeRepo())
+	ids := make([]uuid.UUID, pagination.MaxLimit+1)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+
+	if _, err := svc.List(context.Background(), uuid.New(), ids); !errors.Is(err, appmedia.ErrTooManyIDs) {
+		t.Fatalf("List with more than %d distinct ids: got %v, want ErrTooManyIDs", pagination.MaxLimit, err)
 	}
 }
 
 // --- Delete tests ---
 
 func TestDelete_Success(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
 	created := upload(t, svc, userID, "f.jpg", jpegBytes)
 
@@ -654,7 +412,7 @@ func TestDelete_Success(t *testing.T) {
 }
 
 func TestDelete_WrongOwner_ReturnsNotFoundAndDoesNotDelete(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+	svc := newService(newFakeRepo())
 	owner := uuid.New()
 	other := uuid.New()
 	created := upload(t, svc, owner, "f.jpg", jpegBytes)
@@ -668,83 +426,85 @@ func TestDelete_WrongOwner_ReturnsNotFoundAndDoesNotDelete(t *testing.T) {
 	}
 }
 
-func TestDeleteByOwner_DeletesOnlyThatOwnersMedia(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	hives := newFakeHiveVerifier()
-	svc := newService(newFakeRepo(), apiaries, hives)
+// --- DeleteByIDs tests ---
+
+func TestDeleteByIDs_DeletesOnlyTheGivenIDs(t *testing.T) {
+	svc := newService(newFakeRepo())
 	userID := uuid.New()
-	hiveID := uuid.New()
-	otherHiveID := uuid.New()
-	apiaryID := uuid.New()
-	token := "token"
-	otherHiveToken := "other-hive-token"
-	hives.allow(token, hiveID)
-	hives.allow(otherHiveToken, otherHiveID)
-	apiaries.allow(token, apiaryID)
 
-	for i := 0; i < 2; i++ {
-		uploadAndAttach(t, svc, userID, token, media.OwnerTypeHive, hiveID, "f.jpg", jpegBytes)
-	}
-	// Same owner_id value reused as a different owner_type must survive
-	// (owner_type is part of the scoping key, not just owner_id).
-	keepDifferentOwnerType := uploadAndAttach(t, svc, userID, token, media.OwnerTypeApiary, apiaryID, "f.jpg", jpegBytes)
-	keepOtherOwner := uploadAndAttach(t, svc, userID, otherHiveToken, media.OwnerTypeHive, otherHiveID, "f.jpg", jpegBytes)
+	toDelete1 := upload(t, svc, userID, "1.jpg", jpegBytes).Media
+	toDelete2 := upload(t, svc, userID, "2.jpg", jpegBytes).Media
+	keep := upload(t, svc, userID, "3.jpg", jpegBytes).Media
 
-	count, err := svc.DeleteByOwner(context.Background(), userID, media.OwnerTypeHive, hiveID)
+	count, err := svc.DeleteByIDs(context.Background(), userID, []uuid.UUID{toDelete1.ID, toDelete2.ID, toDelete1.ID})
 	if err != nil {
-		t.Fatalf("DeleteByOwner: %v", err)
+		t.Fatalf("DeleteByIDs: %v", err)
 	}
 	if count != 2 {
-		t.Fatalf("DeleteByOwner count = %d, want 2", count)
+		t.Fatalf("DeleteByIDs count = %d, want 2 (duplicate id counted once)", count)
 	}
 
-	items, total, err := svc.List(context.Background(), userID, media.OwnerTypeHive, hiveID, pagination.Params{Page: 1, Limit: pagination.DefaultLimit})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if total != 0 || len(items) != 0 {
-		t.Fatalf("hiveID's media survived DeleteByOwner: total=%d items=%v", total, items)
-	}
-
-	for _, keep := range []*media.Media{keepDifferentOwnerType, keepOtherOwner} {
-		if _, err := svc.Get(context.Background(), userID, keep.ID); err != nil {
-			t.Fatalf("unrelated media %s should survive DeleteByOwner: %v", keep.ID, err)
+	for _, gone := range []*media.Media{toDelete1, toDelete2} {
+		if _, err := svc.Get(context.Background(), userID, gone.ID); !errors.Is(err, media.ErrNotFound) {
+			t.Fatalf("media %s survived DeleteByIDs: %v", gone.ID, err)
 		}
+	}
+	if _, err := svc.Get(context.Background(), userID, keep.ID); err != nil {
+		t.Fatalf("unrelated media %s should survive DeleteByIDs: %v", keep.ID, err)
 	}
 }
 
-func TestDeleteByOwner_ScopedToUser(t *testing.T) {
-	apiaries := newFakeApiaryVerifier()
-	svc := newService(newFakeRepo(), apiaries, newFakeHiveVerifier())
+func TestDeleteByIDs_ScopedToUser(t *testing.T) {
+	svc := newService(newFakeRepo())
 	owner := uuid.New()
 	other := uuid.New()
-	apiaryID := uuid.New()
-	token := "owner-token"
-	apiaries.allow(token, apiaryID)
+	created := upload(t, svc, owner, "f.jpg", jpegBytes).Media
 
-	created := uploadAndAttach(t, svc, owner, token, media.OwnerTypeApiary, apiaryID, "f.jpg", jpegBytes)
-
-	count, err := svc.DeleteByOwner(context.Background(), other, media.OwnerTypeApiary, apiaryID)
+	count, err := svc.DeleteByIDs(context.Background(), other, []uuid.UUID{created.ID})
 	if err != nil {
-		t.Fatalf("DeleteByOwner by non-owner: %v", err)
+		t.Fatalf("DeleteByIDs by non-owner: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("DeleteByOwner by non-owner count = %d, want 0", count)
+		t.Fatalf("DeleteByIDs by non-owner count = %d, want 0", count)
 	}
 
 	if _, err := svc.Get(context.Background(), owner, created.ID); err != nil {
-		t.Fatalf("owner's media should survive another user's DeleteByOwner: %v", err)
+		t.Fatalf("owner's media should survive another user's DeleteByIDs: %v", err)
 	}
 }
 
-func TestDeleteByOwner_ZeroMatchesIsNotAnError(t *testing.T) {
-	svc := newService(newFakeRepo(), newFakeApiaryVerifier(), newFakeHiveVerifier())
+func TestDeleteByIDs_EmptyIDsIsNotAnError(t *testing.T) {
+	svc := newService(newFakeRepo())
 
-	count, err := svc.DeleteByOwner(context.Background(), uuid.New(), media.OwnerTypeHive, uuid.New())
+	count, err := svc.DeleteByIDs(context.Background(), uuid.New(), nil)
 	if err != nil {
-		t.Fatalf("DeleteByOwner with no matches: %v", err)
+		t.Fatalf("DeleteByIDs with no ids: %v", err)
 	}
 	if count != 0 {
 		t.Fatalf("count = %d, want 0", count)
+	}
+}
+
+func TestDeleteByIDs_UnknownIDsAreNotAnError(t *testing.T) {
+	svc := newService(newFakeRepo())
+
+	count, err := svc.DeleteByIDs(context.Background(), uuid.New(), []uuid.UUID{uuid.New(), uuid.New()})
+	if err != nil {
+		t.Fatalf("DeleteByIDs with unknown ids: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
+	}
+}
+
+func TestDeleteByIDs_TooManyIDs(t *testing.T) {
+	svc := newService(newFakeRepo())
+	ids := make([]uuid.UUID, pagination.MaxLimit+1)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+
+	if _, err := svc.DeleteByIDs(context.Background(), uuid.New(), ids); !errors.Is(err, appmedia.ErrTooManyIDs) {
+		t.Fatalf("DeleteByIDs with more than %d distinct ids: got %v, want ErrTooManyIDs", pagination.MaxLimit, err)
 	}
 }

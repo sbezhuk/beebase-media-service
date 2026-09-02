@@ -4,8 +4,6 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-
-	"github.com/sbezhuk/beebase-common/pagination"
 )
 
 // Repository is the port through which the application persists and
@@ -14,12 +12,10 @@ import (
 // the query itself, not by a separate check layered on top.
 //
 // UserID is set directly from the uploader's own verified token at
-// upload time - it's never looked up via apiary-service/hive-service, so
-// it's available immediately, before a media item is ever attached to
-// anything. OwnerType/OwnerID, once set by Attach, are immutable
-// afterward (apiary-service/hive-service confirmed that ownership exactly
-// once, at attach time), so no cross-service call is needed on later
-// reads.
+// upload time - it's the only ownership concept this service has. Which
+// apiary/hive (if any) references a media id is entirely
+// apiary-service's/hive-service's own concern; this service never learns
+// about it.
 //
 // How file content is physically stored (today: gzip-compressed bytes in
 // a PostgreSQL table, see the postgres implementation) is entirely an
@@ -30,29 +26,25 @@ type Repository interface {
 	// belongs to an existing row, it returns ErrIDConflict.
 	Create(ctx context.Context, m *Media, content []byte) error
 	GetByID(ctx context.Context, userID, mediaID uuid.UUID) (*Media, error)
-	// Attach links mediaID (which must belong to userID and not already
-	// be deleted) to ownerType/ownerID, and returns the updated row.
-	// Calling it again with the same owner is a no-op success (not an
-	// error) - important for safely retrying after a network failure.
-	// Attaching a media item that's already linked to a *different*
-	// owner returns ErrAlreadyAttached; an unknown or not-owned mediaID
-	// returns ErrNotFound.
-	Attach(ctx context.Context, userID, mediaID uuid.UUID, ownerType string, ownerID uuid.UUID) (*Media, error)
 	// GetContent returns the media's metadata alongside its raw (already
 	// decompressed) file content.
 	GetContent(ctx context.Context, userID, mediaID uuid.UUID) (*Media, []byte, error)
-	// ListByOwner returns the page of media described by p, attached to
-	// ownerID of type ownerType and owned by userID, along with the total
-	// number of matching rows (independent of p, for pagination metadata).
-	ListByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID, p pagination.Params) (items []*Media, total int, err error)
+	// ListByIDs returns every media row in ids that belongs to userID and
+	// isn't deleted, in a single query. ids may contain duplicates or ids
+	// that don't exist (or belong to someone else) - both are simply
+	// absent from the result, never an error. The result is not ordered
+	// to match ids; the caller reorders if it needs to.
+	ListByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*Media, error)
 	// Delete soft-deletes the media row (sets deleted_at) and removes its
 	// stored content, reclaiming storage immediately.
 	Delete(ctx context.Context, userID, mediaID uuid.UUID) error
-	// DeleteByOwner hard-deletes every media row (and, via the
-	// media_blobs FK's ON DELETE CASCADE, its stored content) attached to
-	// ownerID of type ownerType and belonging to userID, including rows a
-	// prior soft-delete already marked gone. Used only when apiary-service
-	// or hive-service cascades a delete; a zero count is a normal outcome
-	// (the owner may simply have no media), not an error.
-	DeleteByOwner(ctx context.Context, userID uuid.UUID, ownerType string, ownerID uuid.UUID) (int64, error)
+	// DeleteByIDs hard-deletes every row in ids belonging to userID (and,
+	// via the media_blobs FK's ON DELETE CASCADE, its stored content) in
+	// a single statement, including rows a prior soft-delete already
+	// marked gone. Used by apiary-service/hive-service to cascade a
+	// delete across every media id an apiary/hive itself knows it
+	// references; ids not found (already gone, or never existed) are
+	// simply not counted, never an error - a zero count is a normal
+	// outcome, not an error.
+	DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error)
 }

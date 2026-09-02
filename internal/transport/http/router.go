@@ -39,17 +39,14 @@ func NewRouter(
 		r.Get("/", mediaHandler.List)
 		r.Get("/{mediaID}", mediaHandler.Get)
 		r.Get("/{mediaID}/download", mediaHandler.Download)
-		// Internal-only: called by apiary-service/hive-service reconciling
-		// an apiary/hive's images field, forwarding the caller's own access
-		// token. This route group's RequireAuth can't distinguish that from
-		// a genuine end-user call - beebase-gateway is what actually blocks
-		// external reachability, by never proxying this exact method+path.
-		r.Post("/{mediaID}/attach", mediaHandler.Attach)
 		r.Delete("/{mediaID}", mediaHandler.Delete)
-		// Internal-only, same caveat as Attach above: called by
-		// apiary-service/hive-service when they delete an apiary/hive,
-		// forwarding the caller's own access token. Blocked at the gateway.
-		r.Delete("/", mediaHandler.DeleteByOwner)
+		// Internal-only: called by apiary-service/hive-service when they
+		// delete an apiary/hive, to hard-delete every media id it knows it
+		// references. This route group's RequireAuth can't distinguish that
+		// from a genuine end-user call - beebase-gateway is what actually
+		// blocks external reachability, by never proxying this exact
+		// method+path.
+		r.Delete("/", mediaHandler.DeleteByIDs)
 	})
 
 	return r
