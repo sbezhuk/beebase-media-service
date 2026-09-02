@@ -165,46 +165,26 @@ func (r *MediaRepository) ListByIDs(ctx context.Context, userID uuid.UUID, ids [
 	return items, nil
 }
 
-// Delete soft-deletes the media row and hard-deletes its blob in one
-// transaction, reclaiming storage immediately - unlike a best-effort
-// cleanup against a separate object store, both live in the same
-// database, so there's no reason to leave the delete partial.
+// Delete hard-deletes the media row belonging to userID; the media_blobs
+// FK's ON DELETE CASCADE removes its stored content as part of the same
+// statement.
 func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("postgres: begin delete media tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	const q = `DELETE FROM media WHERE id = $1 AND user_id = $2`
 
-	const softDelete = `
-		UPDATE media
-		SET deleted_at = now()
-		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-	`
-	tag, err := tx.Exec(ctx, softDelete, mediaID, userID)
+	tag, err := r.db.Exec(ctx, q, mediaID, userID)
 	if err != nil {
-		return fmt.Errorf("postgres: soft delete media: %w", err)
+		return fmt.Errorf("postgres: delete media: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return media.ErrNotFound
-	}
-
-	const dropBlob = `DELETE FROM media_blobs WHERE media_id = $1`
-	if _, err := tx.Exec(ctx, dropBlob, mediaID); err != nil {
-		return fmt.Errorf("postgres: delete media blob: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("postgres: commit delete media tx: %w", err)
 	}
 
 	return nil
 }
 
 // DeleteByIDs hard-deletes every row in ids belonging to userID in one
-// statement. No transaction is needed here (unlike Delete): the
-// media_blobs FK is ON DELETE CASCADE, so each row's blob is removed
-// automatically as part of the same DELETE.
+// statement; the media_blobs FK is ON DELETE CASCADE, so each row's blob
+// is removed automatically as part of the same DELETE.
 func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil

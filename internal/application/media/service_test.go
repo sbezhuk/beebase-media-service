@@ -46,7 +46,7 @@ func (f *fakeRepo) GetByID(_ context.Context, userID, mediaID uuid.UUID) (*media
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.byID[mediaID]
-	if !ok || s.m.UserID != userID || s.m.DeletedAt != nil {
+	if !ok || s.m.UserID != userID {
 		return nil, media.ErrNotFound
 	}
 	cp := s.m
@@ -57,7 +57,7 @@ func (f *fakeRepo) GetContent(_ context.Context, userID, mediaID uuid.UUID) (*me
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.byID[mediaID]
-	if !ok || s.m.UserID != userID || s.m.DeletedAt != nil {
+	if !ok || s.m.UserID != userID {
 		return nil, nil, media.ErrNotFound
 	}
 	cp := s.m
@@ -74,7 +74,7 @@ func (f *fakeRepo) ListByIDs(_ context.Context, userID uuid.UUID, ids []uuid.UUI
 	}
 	var all []*media.Media
 	for _, s := range f.byID {
-		if idSet[s.m.ID] && s.m.UserID == userID && s.m.DeletedAt == nil {
+		if idSet[s.m.ID] && s.m.UserID == userID {
 			cp := s.m
 			all = append(all, &cp)
 		}
@@ -93,12 +93,10 @@ func (f *fakeRepo) Delete(_ context.Context, userID, mediaID uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.byID[mediaID]
-	if !ok || s.m.UserID != userID || s.m.DeletedAt != nil {
+	if !ok || s.m.UserID != userID {
 		return media.ErrNotFound
 	}
-	now := s.m.UpdatedAt
-	s.m.DeletedAt = &now
-	s.content = nil
+	delete(f.byID, mediaID)
 	return nil
 }
 

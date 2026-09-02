@@ -158,25 +158,56 @@ func TestMediaRepository_ListByIDs_EmptyIDsReturnsEmptySlice(t *testing.T) {
 	}
 }
 
-func TestMediaRepository_Delete_SoftDeletesAndRemovesBlob(t *testing.T) {
-	repo := newTestRepo(t)
+func TestMediaRepository_Delete_HardDeletesRowAndBlob(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+
+	repo := repopostgres.NewMediaRepository(tx)
 	userID := uuid.New()
 	content := []byte("gone soon")
 
 	m := media.New(uuid.New(), userID, "f.txt", "text/plain", int64(len(content)))
-	if err := repo.Create(context.Background(), m, content); err != nil {
+	if err := repo.Create(ctx, m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := repo.Delete(context.Background(), userID, m.ID); err != nil {
+	if err := repo.Delete(ctx, userID, m.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	if _, err := repo.GetByID(context.Background(), userID, m.ID); err != media.ErrNotFound {
+	if _, err := repo.GetByID(ctx, userID, m.ID); err != media.ErrNotFound {
 		t.Fatalf("GetByID after Delete: got %v, want ErrNotFound", err)
 	}
-	if _, _, err := repo.GetContent(context.Background(), userID, m.ID); err != media.ErrNotFound {
+	if _, _, err := repo.GetContent(ctx, userID, m.ID); err != media.ErrNotFound {
 		t.Fatalf("GetContent after Delete: got %v, want ErrNotFound", err)
+	}
+
+	var n int
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM media WHERE id = $1", m.ID).Scan(&n); err != nil {
+		t.Fatalf("raw count for media: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("media %s still present after Delete; want fully removed", m.ID)
+	}
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM media_blobs WHERE media_id = $1", m.ID).Scan(&n); err != nil {
+		t.Fatalf("raw count for media_blobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("media_blobs %s still present after Delete; want cascaded away", m.ID)
+	}
+
+	// The id is fully free again: a new upload can reuse it, unlike a
+	// soft-delete which would leave it permanently taken by the (hidden)
+	// old row.
+	m2 := media.New(m.ID, userID, "f2.txt", "text/plain", 3)
+	if err := repo.Create(ctx, m2, []byte("abc")); err != nil {
+		t.Fatalf("Create reusing a hard-deleted id: %v", err)
 	}
 }
 
@@ -224,8 +255,9 @@ func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDs(t *testing.T) {
 	toDelete2 := create("f2.jpg")
 	keep := create("f3.jpg")
 
-	// Already soft-deleted (via the single-item Delete) media must still
-	// be purged: DeleteByIDs has no deleted_at filter.
+	// An id that's already gone (hard-deleted via the single-item Delete,
+	// or never created at all) simply contributes nothing to the count -
+	// never an error.
 	alreadyGone := create("f4.jpg")
 	if err := repo.Delete(ctx, userID, alreadyGone.ID); err != nil {
 		t.Fatalf("Delete already-gone: %v", err)
@@ -235,8 +267,8 @@ func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteByIDs: %v", err)
 	}
-	if count != 3 {
-		t.Fatalf("DeleteByIDs count = %d, want 3", count)
+	if count != 2 {
+		t.Fatalf("DeleteByIDs count = %d, want 2", count)
 	}
 
 	for _, id := range []uuid.UUID{toDelete1.ID, toDelete2.ID, alreadyGone.ID} {

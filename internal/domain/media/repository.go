@@ -35,13 +35,11 @@ type Repository interface {
 	// absent from the result, never an error. The result is not ordered
 	// to match ids; the caller reorders if it needs to.
 	ListByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*Media, error)
-	// Delete soft-deletes the media row (sets deleted_at) and removes its
-	// stored content, reclaiming storage immediately.
+	// Delete hard-deletes the media row and its stored content.
 	Delete(ctx context.Context, userID, mediaID uuid.UUID) error
 	// DeleteByIDs hard-deletes every row in ids belonging to userID (and,
 	// via the media_blobs FK's ON DELETE CASCADE, its stored content) in
-	// a single statement, including rows a prior soft-delete already
-	// marked gone. Used by apiary-service/hive-service to cascade a
+	// a single statement. Used by apiary-service/hive-service to cascade a
 	// delete across every media id an apiary/hive itself knows it
 	// references; ids not found (already gone, or never existed) are
 	// simply not counted, never an error - a zero count is a normal
