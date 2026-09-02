@@ -8,15 +8,19 @@ info:
     service verifies them against auth-service's public key and never
     trusts a userID from anywhere but a verified token.
 
-    A file (photo, PDF, XML, or other document) attaches to exactly one
-    owning entity in another service - currently an apiary or a hive.
-    Uploading requires that the caller own the referenced owner; this
-    service confirms that by forwarding the caller's own access token to
-    apiary-service's or hive-service's GET /api/v1/{apiaries,hives}/{id}
-    and trusting its answer - it never queries apiary or hive ownership
-    itself, and never embeds Apiary/Hive-specific logic: owner_type and
-    owner_id are generic so the same infrastructure can support future
-    entity types without a schema change.
+    A file (photo, PDF, XML, or other document) is uploaded on its own,
+    owned only by the caller - no apiary or hive needs to exist yet, and
+    upload never checks apiary/hive ownership. It optionally attaches to
+    exactly one owning entity in another service (currently an apiary or a
+    hive) via a separate attach call once one does. Attaching requires
+    that the caller own the referenced owner; this service confirms that
+    by forwarding the caller's own access token to apiary-service's or
+    hive-service's GET /api/v1/{apiaries,hives}/{id} and trusting its
+    answer - it never queries apiary or hive ownership itself, and never
+    embeds Apiary/Hive-specific logic: owner_type and owner_id are generic
+    so the same infrastructure can support future entity types without a
+    schema change. A media item's owner is fixed the first time it's
+    attached and can never be moved or cleared afterward.
 
     Storage note (MVP): file bytes are stored directly in PostgreSQL,
     gzip-compressed where that helps, rather than in a separate object
@@ -71,15 +75,13 @@ paths:
   /api/v1/media:
     post:
       tags: [media]
-      summary: Upload a file, attached to an apiary or a hive the caller owns
+      summary: Upload a file, owned by the caller and not yet attached to anything
       description: >
-        multipart/form-data. Rejected with 404 apiary_not_found /
-        hive_not_found if owner_id doesn't exist or doesn't belong to the
-        caller - verified live against apiary-service/hive-service, not
-        trusted from the request. The server never trusts the client's
-        declared file type: the extension is checked against an allowlist
-        and, where reliably sniffable, cross-checked against the file's
-        actual bytes.
+        multipart/form-data. No apiary or hive needs to exist yet - use
+        POST /media/{mediaId}/attach afterward to link the upload to one.
+        The server never trusts the client's declared file type: the
+        extension is checked against an allowlist and, where reliably
+        sniffable, cross-checked against the file's actual bytes.
 
         media_id is an optional client-generated idempotency key: retrying
         the same upload (e.g. after a network failure) with the same
@@ -103,17 +105,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/MediaResponse" }
         "400":
-          description: Request failed validation (missing/malformed owner_type, owner_id, media_id, or no file part).
+          description: Request failed validation (malformed media_id, or no file part).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
         "401":
           description: Missing, invalid, or expired access token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "404":
-          description: owner_id doesn't exist, or belongs to a different user.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -144,7 +141,7 @@ paths:
         - name: owner_type
           in: query
           required: true
-          schema: { type: string, enum: [APIARY, HIVE] }
+          schema: { type: string, enum: [apiary, hive] }
         - name: owner_id
           in: query
           required: true
@@ -194,7 +191,8 @@ paths:
       description: >
         Returns 404 both when mediaId doesn't exist and when it belongs to
         a different user - the two cases are indistinguishable to the
-        caller, by design.
+        caller, by design. owner_type/owner_id are null until the file is
+        attached to something (see POST /media/{mediaId}/attach).
       responses:
         "200":
           description: The file's metadata.
@@ -238,6 +236,60 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "404":
           description: No such file, or it belongs to a different user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/media/{mediaId}/attach:
+    parameters:
+      - name: mediaId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+
+    post:
+      tags: [media]
+      summary: Link an uploaded file to an apiary or a hive the caller owns
+      description: >
+        Rejected with 404 apiary_not_found / hive_not_found if owner_id
+        doesn't exist or doesn't belong to the caller - verified live
+        against apiary-service/hive-service, not trusted from the request.
+
+        Idempotent: calling it again with the same owner_type/owner_id
+        succeeds without error (200), so a retry after a network failure
+        is safe. A media item's owner is fixed the first time it's
+        attached and can never be moved - attaching media that's already
+        linked to a *different* owner fails with 409 already_attached.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AttachMediaRequest" }
+      responses:
+        "200":
+          description: The file is now attached to owner_type/owner_id (or already was).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MediaResponse" }
+        "400":
+          description: mediaId is not a valid UUID, or the request failed validation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorResponse" }
+        "401":
+          description: Missing, invalid, or expired access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: >
+            mediaId doesn't exist or belongs to a different user, or
+            owner_id doesn't exist or belongs to a different user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: mediaId is already attached to a different owner.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -294,16 +346,8 @@ components:
 
     UploadMediaRequest:
       type: object
-      required: [owner_type, owner_id, file]
+      required: [file]
       properties:
-        owner_type:
-          type: string
-          enum: [APIARY, HIVE]
-          description: The type of entity this file attaches to.
-        owner_id:
-          type: string
-          format: uuid
-          description: Must be an apiary or hive (per owner_type) owned by the caller.
         media_id:
           type: string
           format: uuid
@@ -312,16 +356,37 @@ components:
           type: string
           format: binary
 
+    AttachMediaRequest:
+      type: object
+      required: [owner_type, owner_id]
+      properties:
+        owner_type:
+          type: string
+          enum: [apiary, hive]
+          description: The type of entity this file attaches to.
+        owner_id:
+          type: string
+          format: uuid
+          description: Must be an apiary or hive (per owner_type) owned by the caller.
+
     MediaResponse:
       type: object
       properties:
         id: { type: string, format: uuid }
-        owner_type: { type: string, enum: [APIARY, HIVE] }
-        owner_id: { type: string, format: uuid }
+        owner_type:
+          type: string
+          enum: [apiary, hive]
+          nullable: true
+          description: Null until the file is attached to something.
+        owner_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null until the file is attached to something.
         original_filename: { type: string }
         content_type: { type: string, example: image/jpeg }
         size_bytes: { type: integer, format: int64 }
-        status: { type: string, enum: [AVAILABLE] }
+        status: { type: string, enum: [available] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -359,6 +424,7 @@ components:
                 - file_too_large
                 - media_id_conflict
                 - file_required
+                - already_attached
                 - missing_authorization
                 - invalid_access_token
                 - invalid_body

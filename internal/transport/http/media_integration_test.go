@@ -196,11 +196,9 @@ func (s *testStack) do(t *testing.T, method, path, token, contentType string, bo
 // uploadOpts customizes buildUpload; zero-value fields fall back to
 // reasonable defaults for the common case.
 type uploadOpts struct {
-	ownerType string
-	ownerID   string
-	mediaID   string // optional
-	filename  string
-	content   []byte
+	mediaID  string // optional
+	filename string
+	content  []byte
 }
 
 func (s *testStack) upload(t *testing.T, token string, opts uploadOpts) *http.Response {
@@ -209,12 +207,6 @@ func (s *testStack) upload(t *testing.T, token string, opts uploadOpts) *http.Re
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 
-	if opts.ownerType != "" {
-		_ = w.WriteField("owner_type", opts.ownerType)
-	}
-	if opts.ownerID != "" {
-		_ = w.WriteField("owner_id", opts.ownerID)
-	}
 	if opts.mediaID != "" {
 		_ = w.WriteField("media_id", opts.mediaID)
 	}
@@ -234,6 +226,18 @@ func (s *testStack) upload(t *testing.T, token string, opts uploadOpts) *http.Re
 	return s.do(t, http.MethodPost, "/api/v1/media", token, w.FormDataContentType(), &buf)
 }
 
+// attach calls POST /media/{mediaID}/attach with the given owner_type and
+// owner_id (raw strings, so a test can exercise malformed values too).
+func (s *testStack) attach(t *testing.T, mediaID, token, ownerType, ownerID string) *http.Response {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]string{"owner_type": ownerType, "owner_id": ownerID})
+	if err != nil {
+		t.Fatalf("marshal attach body: %v", err)
+	}
+	return s.do(t, http.MethodPost, "/api/v1/media/"+mediaID+"/attach", token, "application/json", bytes.NewReader(body))
+}
+
 func decodeJSON(t *testing.T, resp *http.Response, dst any) {
 	t.Helper()
 	defer func() { _ = resp.Body.Close() }()
@@ -245,21 +249,43 @@ func decodeJSON(t *testing.T, resp *http.Response, dst any) {
 
 var jpegBytes = append([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}, make([]byte, 32)...)
 
-func TestMediaFlow_UploadGetDownloadDelete_Apiary(t *testing.T) {
+func TestMediaFlow_UploadUnattached(t *testing.T) {
+	stack := newTestStack(t)
+	token := stack.tokenFor(t, uuid.New())
+
+	resp := stack.upload(t, token, uploadOpts{filename: "hive1.jpg", content: jpegBytes})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var created mediahttp.Response
+	decodeJSON(t, resp, &created)
+	if created.OwnerType != nil || created.OwnerID != nil {
+		t.Fatalf("upload: owner = %v/%v, want nil/nil (unattached)", created.OwnerType, created.OwnerID)
+	}
+}
+
+func TestMediaFlow_AttachGetDownloadDelete_Apiary(t *testing.T) {
 	stack := newTestStack(t)
 	userID := uuid.New()
 	apiaryID := uuid.New()
 	token := stack.tokenFor(t, userID)
 	stack.apiary.allow(token, apiaryID)
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: apiaryID.String(), filename: "hive1.jpg", content: jpegBytes})
+	resp := stack.upload(t, token, uploadOpts{filename: "hive1.jpg", content: jpegBytes})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 	var created mediahttp.Response
 	decodeJSON(t, resp, &created)
-	if created.OwnerType != "APIARY" || created.OwnerID != apiaryID {
-		t.Fatalf("upload: owner = %s/%s, want apiary/%s", created.OwnerType, created.OwnerID, apiaryID)
+
+	resp = stack.attach(t, created.ID.String(), token, "APIARY", apiaryID.String())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var attached mediahttp.Response
+	decodeJSON(t, resp, &attached)
+	if attached.OwnerType == nil || *attached.OwnerType != "APIARY" || attached.OwnerID == nil || *attached.OwnerID != apiaryID {
+		t.Fatalf("attach: owner = %v/%v, want apiary/%s", attached.OwnerType, attached.OwnerID, apiaryID)
 	}
 
 	resp = stack.get(t, "/api/v1/media/"+created.ID.String(), token)
@@ -294,33 +320,97 @@ func TestMediaFlow_UploadGetDownloadDelete_Apiary(t *testing.T) {
 	}
 }
 
-func TestMediaFlow_UploadGetDownloadDelete_Hive(t *testing.T) {
+func TestMediaFlow_Attach_Hive(t *testing.T) {
 	stack := newTestStack(t)
 	userID := uuid.New()
 	hiveID := uuid.New()
 	token := stack.tokenFor(t, userID)
 	stack.hive.allow(token, hiveID)
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "HIVE", ownerID: hiveID.String(), filename: "hive1.jpg", content: jpegBytes})
+	resp := stack.upload(t, token, uploadOpts{filename: "hive1.jpg", content: jpegBytes})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 	var created mediahttp.Response
 	decodeJSON(t, resp, &created)
-	if created.OwnerType != "HIVE" || created.OwnerID != hiveID {
-		t.Fatalf("upload: owner = %s/%s, want hive/%s", created.OwnerType, created.OwnerID, hiveID)
+
+	resp = stack.attach(t, created.ID.String(), token, "HIVE", hiveID.String())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var attached mediahttp.Response
+	decodeJSON(t, resp, &attached)
+	if attached.OwnerType == nil || *attached.OwnerType != "HIVE" || attached.OwnerID == nil || *attached.OwnerID != hiveID {
+		t.Fatalf("attach: owner = %v/%v, want hive/%s", attached.OwnerType, attached.OwnerID, hiveID)
 	}
 }
 
-func TestMediaFlow_UploadRejectedWhenOwnerNotOwned(t *testing.T) {
+func TestMediaFlow_AttachIdempotentRetry(t *testing.T) {
+	stack := newTestStack(t)
+	userID := uuid.New()
+	apiaryID := uuid.New()
+	token := stack.tokenFor(t, userID)
+	stack.apiary.allow(token, apiaryID)
+
+	resp := stack.upload(t, token, uploadOpts{filename: "f.jpg", content: jpegBytes})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var created mediahttp.Response
+	decodeJSON(t, resp, &created)
+
+	resp = stack.attach(t, created.ID.String(), token, "APIARY", apiaryID.String())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first attach: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	resp = stack.attach(t, created.ID.String(), token, "APIARY", apiaryID.String())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("retried attach with the same owner: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestMediaFlow_AttachAlreadyAttachedToDifferentOwnerConflicts(t *testing.T) {
+	stack := newTestStack(t)
+	userID := uuid.New()
+	firstApiary := uuid.New()
+	secondApiary := uuid.New()
+	token := stack.tokenFor(t, userID)
+	stack.apiary.allow(token, firstApiary)
+
+	resp := stack.upload(t, token, uploadOpts{filename: "f.jpg", content: jpegBytes})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var created mediahttp.Response
+	decodeJSON(t, resp, &created)
+
+	if resp := stack.attach(t, created.ID.String(), token, "APIARY", firstApiary.String()); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first attach: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	stack.apiary.allow(token, secondApiary)
+	resp = stack.attach(t, created.ID.String(), token, "APIARY", secondApiary.String())
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("re-attach to a different apiary: status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+}
+
+func TestMediaFlow_AttachRejectedWhenOwnerNotOwned(t *testing.T) {
 	stack := newTestStack(t)
 	token := stack.tokenFor(t, uuid.New())
 	someoneElsesApiary := uuid.New()
 	// Deliberately not calling stack.apiary.allow for this token/apiary pair.
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: someoneElsesApiary.String(), filename: "hive1.jpg", content: jpegBytes})
+	resp := stack.upload(t, token, uploadOpts{filename: "f.jpg", content: jpegBytes})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var created mediahttp.Response
+	decodeJSON(t, resp, &created)
+
+	resp = stack.attach(t, created.ID.String(), token, "APIARY", someoneElsesApiary.String())
 	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("upload under unowned apiary: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+		t.Fatalf("attach to unowned apiary: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 	var body map[string]any
 	decodeJSON(t, resp, &body)
@@ -332,12 +422,9 @@ func TestMediaFlow_UploadRejectedWhenOwnerNotOwned(t *testing.T) {
 
 func TestMediaFlow_UploadRejectedForUnsupportedType(t *testing.T) {
 	stack := newTestStack(t)
-	userID := uuid.New()
-	apiaryID := uuid.New()
-	token := stack.tokenFor(t, userID)
-	stack.apiary.allow(token, apiaryID)
+	token := stack.tokenFor(t, uuid.New())
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: apiaryID.String(), filename: "malware.exe", content: []byte("not really an exe")})
+	resp := stack.upload(t, token, uploadOpts{filename: "malware.exe", content: []byte("not really an exe")})
 	if resp.StatusCode != http.StatusUnsupportedMediaType {
 		t.Fatalf("upload .exe: status = %d, want %d", resp.StatusCode, http.StatusUnsupportedMediaType)
 	}
@@ -345,12 +432,9 @@ func TestMediaFlow_UploadRejectedForUnsupportedType(t *testing.T) {
 
 func TestMediaFlow_UploadRejectedWhenTooLarge(t *testing.T) {
 	stack := newTestStack(t)
-	userID := uuid.New()
-	apiaryID := uuid.New()
-	token := stack.tokenFor(t, userID)
-	stack.apiary.allow(token, apiaryID)
+	token := stack.tokenFor(t, uuid.New())
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: apiaryID.String(), filename: "big.jpg", content: make([]byte, testMaxUploadSizeBytes+1)})
+	resp := stack.upload(t, token, uploadOpts{filename: "big.jpg", content: make([]byte, testMaxUploadSizeBytes+1)})
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized upload: status = %d, want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
 	}
@@ -358,13 +442,10 @@ func TestMediaFlow_UploadRejectedWhenTooLarge(t *testing.T) {
 
 func TestMediaFlow_UploadIdempotentRetry(t *testing.T) {
 	stack := newTestStack(t)
-	userID := uuid.New()
-	apiaryID := uuid.New()
-	token := stack.tokenFor(t, userID)
-	stack.apiary.allow(token, apiaryID)
+	token := stack.tokenFor(t, uuid.New())
 	mediaID := uuid.New().String()
 
-	opts := uploadOpts{ownerType: "APIARY", ownerID: apiaryID.String(), mediaID: mediaID, filename: "hive1.jpg", content: jpegBytes}
+	opts := uploadOpts{mediaID: mediaID, filename: "hive1.jpg", content: jpegBytes}
 
 	resp := stack.upload(t, token, opts)
 	if resp.StatusCode != http.StatusCreated {
@@ -396,12 +477,16 @@ func TestMediaFlow_CannotAccessAnotherUsersMedia(t *testing.T) {
 	otherToken := stack.tokenFor(t, other)
 	stack.apiary.allow(ownerToken, apiaryID)
 
-	resp := stack.upload(t, ownerToken, uploadOpts{ownerType: "APIARY", ownerID: apiaryID.String(), filename: "owner.jpg", content: jpegBytes})
+	resp := stack.upload(t, ownerToken, uploadOpts{filename: "owner.jpg", content: jpegBytes})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload: status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 	var created mediahttp.Response
 	decodeJSON(t, resp, &created)
+
+	if resp := stack.attach(t, created.ID.String(), ownerToken, "APIARY", apiaryID.String()); resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
 
 	if resp := stack.get(t, "/api/v1/media/"+created.ID.String(), otherToken); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("get as a different user: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
@@ -439,14 +524,24 @@ func TestMediaFlow_ListFiltersByOwner(t *testing.T) {
 	stack.hive.allow(token, hiveID)
 
 	for i := 0; i < 2; i++ {
-		resp := stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: apiaryID.String(), filename: "a.jpg", content: jpegBytes})
+		resp := stack.upload(t, token, uploadOpts{filename: "a.jpg", content: jpegBytes})
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("upload apiary %d: status = %d, want %d", i, resp.StatusCode, http.StatusCreated)
 		}
+		var created mediahttp.Response
+		decodeJSON(t, resp, &created)
+		if resp := stack.attach(t, created.ID.String(), token, "APIARY", apiaryID.String()); resp.StatusCode != http.StatusOK {
+			t.Fatalf("attach apiary %d: status = %d, want %d", i, resp.StatusCode, http.StatusOK)
+		}
 	}
-	resp := stack.upload(t, token, uploadOpts{ownerType: "HIVE", ownerID: hiveID.String(), filename: "h.jpg", content: jpegBytes})
+	resp := stack.upload(t, token, uploadOpts{filename: "h.jpg", content: jpegBytes})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload hive: status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	var hiveMedia mediahttp.Response
+	decodeJSON(t, resp, &hiveMedia)
+	if resp := stack.attach(t, hiveMedia.ID.String(), token, "HIVE", hiveID.String()); resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach hive: status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
 	resp = stack.get(t, "/api/v1/media?owner_type=APIARY&owner_id="+apiaryID.String(), token)
@@ -472,20 +567,26 @@ func TestMediaFlow_DeleteByOwner(t *testing.T) {
 	token := stack.tokenFor(t, userID)
 	stack.hive.allow(token, hiveA)
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "HIVE", ownerID: hiveA.String(), filename: "a.jpg", content: jpegBytes})
+	resp := stack.upload(t, token, uploadOpts{filename: "a.jpg", content: jpegBytes})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload for hiveA: status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 	var inHiveA mediahttp.Response
 	decodeJSON(t, resp, &inHiveA)
+	if resp := stack.attach(t, inHiveA.ID.String(), token, "HIVE", hiveA.String()); resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach for hiveA: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
 
 	stack.hive.allow(token, hiveB)
-	resp = stack.upload(t, token, uploadOpts{ownerType: "HIVE", ownerID: hiveB.String(), filename: "b.jpg", content: jpegBytes})
+	resp = stack.upload(t, token, uploadOpts{filename: "b.jpg", content: jpegBytes})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload for hiveB: status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 	var inHiveB mediahttp.Response
 	decodeJSON(t, resp, &inHiveB)
+	if resp := stack.attach(t, inHiveB.ID.String(), token, "HIVE", hiveB.String()); resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach for hiveB: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
 
 	resp = stack.delete(t, "/api/v1/media?owner_type=HIVE&owner_id="+hiveA.String(), token)
 	if resp.StatusCode != http.StatusNoContent {
@@ -523,19 +624,26 @@ func TestMediaFlow_ValidationErrors(t *testing.T) {
 	stack := newTestStack(t)
 	token := stack.tokenFor(t, uuid.New())
 
-	resp := stack.upload(t, token, uploadOpts{ownerType: "not_a_type", ownerID: uuid.New().String(), filename: "f.jpg", content: jpegBytes})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("upload with invalid owner_type: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
-	}
-
-	resp = stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: "not-a-uuid", filename: "f.jpg", content: jpegBytes})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("upload with malformed owner_id: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
-	}
-
-	resp = stack.upload(t, token, uploadOpts{ownerType: "APIARY", ownerID: uuid.New().String()}) // no file part
+	resp := stack.upload(t, token, uploadOpts{}) // no file part
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("upload with no file: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	uploaded := stack.upload(t, token, uploadOpts{filename: "f.jpg", content: jpegBytes})
+	if uploaded.StatusCode != http.StatusCreated {
+		t.Fatalf("upload: status = %d, want %d", uploaded.StatusCode, http.StatusCreated)
+	}
+	var created mediahttp.Response
+	decodeJSON(t, uploaded, &created)
+
+	resp = stack.attach(t, created.ID.String(), token, "not_a_type", uuid.New().String())
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("attach with invalid owner_type: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	resp = stack.attach(t, created.ID.String(), token, "APIARY", "not-a-uuid")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("attach with malformed owner_id: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 
 	resp = stack.get(t, "/api/v1/media/not-a-uuid", token)

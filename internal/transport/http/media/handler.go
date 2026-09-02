@@ -41,11 +41,12 @@ const (
 	CodeFileTooLarge        = "file_too_large"
 	CodeMediaIDConflict     = "media_id_conflict"
 	CodeFileRequired        = "file_required"
+	CodeAlreadyAttached     = "already_attached"
 )
 
 // multipartOverheadBytes accounts for multipart boundaries, headers, and
-// the other form fields (owner_type, owner_id, media_id) beyond the file
-// content itself, when bounding the total request body size.
+// the media_id form field beyond the file content itself, when bounding
+// the total request body size.
 const multipartOverheadBytes = 64 * 1024
 
 // Handler exposes the media HTTP endpoints. Every method requires the
@@ -64,7 +65,7 @@ func NewHandler(service *appmedia.Service, log *slog.Logger, maxUploadSizeBytes 
 
 // Upload handles POST /media.
 func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
-	userID, token, ok := h.requireAuth(w, r)
+	userID, ok := h.requireUserID(w, r)
 	if !ok {
 		return
 	}
@@ -82,9 +83,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	req := UploadRequest{
-		OwnerType: r.FormValue("owner_type"),
-		OwnerID:   r.FormValue("owner_id"),
-		MediaID:   r.FormValue("media_id"),
+		MediaID: r.FormValue("media_id"),
 	}
 	fields := req.Validate()
 
@@ -107,8 +106,6 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ownerID, _ := uuid.Parse(req.OwnerID) // already validated by req.Validate
-
 	var clientMediaID *uuid.UUID
 	if req.MediaID != "" {
 		id, _ := uuid.Parse(req.MediaID) // already validated by req.Validate
@@ -117,9 +114,6 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.Upload(r.Context(), appmedia.UploadInput{
 		UserID:           userID,
-		AccessToken:      token,
-		OwnerType:        req.OwnerType,
-		OwnerID:          ownerID,
 		ClientMediaID:    clientMediaID,
 		OriginalFilename: header.Filename,
 		Content:          content,
@@ -155,6 +149,40 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, newResponse(got))
+}
+
+// Attach handles POST /media/{mediaID}/attach.
+func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
+	userID, token, ok := h.requireAuth(w, r)
+	if !ok {
+		return
+	}
+
+	mediaID, ok := h.pathMediaID(w, r)
+	if !ok {
+		return
+	}
+
+	var req AttachRequest
+	if !decodeAndValidate(w, r, &req) {
+		return
+	}
+	// Already validated as well-formed by req.Validate.
+	ownerID, _ := uuid.Parse(req.OwnerID)
+
+	m, err := h.service.Attach(r.Context(), appmedia.AttachInput{
+		UserID:      userID,
+		AccessToken: token,
+		MediaID:     mediaID,
+		OwnerType:   req.OwnerType,
+		OwnerID:     ownerID,
+	})
+	if err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, newResponse(m))
 }
 
 // Download handles GET /media/{mediaID}/download.
@@ -326,6 +354,8 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusRequestEntityTooLarge, CodeFileTooLarge, "file exceeds the maximum allowed size")
 	case errors.Is(err, appmedia.ErrMediaIDConflict):
 		httpx.WriteError(w, http.StatusConflict, CodeMediaIDConflict, "media id already used by another upload")
+	case errors.Is(err, media.ErrAlreadyAttached):
+		httpx.WriteError(w, http.StatusConflict, CodeAlreadyAttached, "media is already attached to a different owner")
 	default:
 		httpx.WriteInternalError(w, h.log, err)
 	}

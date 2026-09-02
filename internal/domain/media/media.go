@@ -24,17 +24,21 @@ const (
 // virus-scan/quarantine state.
 const StatusAvailable = "AVAILABLE"
 
-// Media is an uploaded file (photo, PDF, XML, or other document) attached
-// to exactly one owning entity in another service (an apiary or a hive).
-// It is a synchronizable entity (UUID, created_at, updated_at, deleted_at)
-// per the project's offline-sync plan, even though full sync isn't
-// implemented yet.
+// Media is an uploaded file (photo, PDF, XML, or other document), owned by
+// the user who uploaded it. It may optionally be attached to one owning
+// entity in another service (an apiary or a hive) - OwnerType/OwnerID are
+// nil until Attach links it, and immutable afterward: once attached, a
+// media item can't be moved to a different owner. It is a synchronizable
+// entity (UUID, created_at, updated_at, deleted_at) per the project's
+// offline-sync plan, even though full sync isn't implemented yet.
 type Media struct {
 	ID     uuid.UUID
 	UserID uuid.UUID // denormalized owner; see Repository doc comment
 
-	OwnerType string // OwnerTypeApiary | OwnerTypeHive
-	OwnerID   uuid.UUID
+	// OwnerType and OwnerID are both nil, or both set - never one without
+	// the other. Nil means "uploaded but not yet attached to anything".
+	OwnerType *string // OwnerTypeApiary | OwnerTypeHive
+	OwnerID   *uuid.UUID
 
 	OriginalFilename string
 	ContentType      string // canonical MIME, derived server-side; never the client's raw header
@@ -46,19 +50,22 @@ type Media struct {
 	DeletedAt *time.Time
 }
 
-// New constructs a Media row with the given id. Unlike most other
-// entities in this codebase, id is a caller-supplied parameter rather
-// than always generated internally: the application layer needs to honor
-// an optional client-generated idempotency key for retried uploads.
-// Callers must have already verified that ownerID belongs to userID
-// before calling New.
-func New(id, userID uuid.UUID, ownerType string, ownerID uuid.UUID, originalFilename, contentType string, sizeBytes int64) *Media {
+// IsAttached reports whether m is currently linked to an owning apiary or
+// hive.
+func (m *Media) IsAttached() bool {
+	return m.OwnerType != nil
+}
+
+// New constructs a Media row with the given id, unattached to any owner.
+// Unlike most other entities in this codebase, id is a caller-supplied
+// parameter rather than always generated internally: the application
+// layer needs to honor an optional client-generated idempotency key for
+// retried uploads.
+func New(id, userID uuid.UUID, originalFilename, contentType string, sizeBytes int64) *Media {
 	now := time.Now().UTC()
 	return &Media{
 		ID:               id,
 		UserID:           userID,
-		OwnerType:        ownerType,
-		OwnerID:          ownerID,
 		OriginalFilename: originalFilename,
 		ContentType:      contentType,
 		SizeBytes:        sizeBytes,

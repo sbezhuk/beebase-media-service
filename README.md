@@ -5,13 +5,14 @@ an open-source backend for a beekeeper management application split into
 microservices. See [CLAUDE.md](https://github.com/sbezhuk/beebase-auth-service/blob/main/CLAUDE.md)
 for the architectural rules this service follows.
 
-This service stores files (photos, PDFs, XML, and other documents)
-attached to an entity owned by another service — currently an apiary or a
-hive. It has no Apiary/Hive-specific logic baked in: `owner_type` +
-`owner_id` are generic, so the same infrastructure can support more
-entity types later without a schema change. It never trusts a client's
-claimed file type or a client-supplied owner/user pairing — see
-[Security](#security) and [Ownership](#ownership) below.
+This service stores files (photos, PDFs, XML, and other documents),
+uploaded independently of any owner and optionally attached afterward to
+an entity owned by another service — currently an apiary or a hive. It
+has no Apiary/Hive-specific logic baked in: `owner_type` + `owner_id` are
+generic, so the same infrastructure can support more entity types later
+without a schema change. It never trusts a client's claimed file type or
+a client-supplied owner/user pairing — see [Security](#security) and
+[Ownership](#ownership) below.
 
 Related services: `beebase-auth-service` (users, refresh tokens, JWT
 issuing), `beebase-apiary-service`, `beebase-hive-service`,
@@ -19,11 +20,10 @@ issuing), `beebase-apiary-service`, `beebase-hive-service`,
 
 This service is reachable through `beebase-gateway` at `/api/v1/media`,
 same as every other backend service — see its docker-compose for the
-full stack. **Not yet wired up** (deliberately, for now):
-`beebase-apiary-service` and `beebase-hive-service` don't yet expose
-their own "this apiary/hive has these photos" endpoints referencing this
-service. This service is fully functional standalone or behind the
-gateway either way; that integration is a follow-up.
+full stack. `beebase-apiary-service` and `beebase-hive-service` each
+expose an `images: []` field (on GET and PUT) that reflects and manages
+which media is attached to a given apiary/hive, backed by this service's
+own attach/list endpoints.
 
 ## Requirements
 
@@ -62,9 +62,14 @@ curl http://localhost:8080/ready    # readiness — 200 only if the database is 
 TOKEN=...      # an access_token from auth-service's /api/v1/auth/register or /login
 APIARY_ID=...  # an apiary that TOKEN's owner created via apiary-service
 
-curl -X POST http://localhost:8080/api/v1/media \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "owner_type=APIARY" -F "owner_id=$APIARY_ID" -F "file=@hive1.jpg"
+# Upload: no apiary/hive needed yet.
+MEDIA_ID=$(curl -s -X POST http://localhost:8080/api/v1/media \
+  -H "Authorization: Bearer $TOKEN" -F "file=@hive1.jpg" | jq -r .id)
+
+# Attach: links it to an apiary the caller owns.
+curl -X POST "http://localhost:8080/api/v1/media/$MEDIA_ID/attach" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"owner_type\":\"APIARY\",\"owner_id\":\"$APIARY_ID\"}"
 
 curl "http://localhost:8080/api/v1/media?owner_type=APIARY&owner_id=$APIARY_ID" \
   -H "Authorization: Bearer $TOKEN"
@@ -95,8 +100,8 @@ All configuration is via environment variables (see
 | `DATABASE_URL`              | *(required)*                 | PostgreSQL DSN                            |
 | `DATABASE_CONNECT_TIMEOUT`  | `5s`                         | Timeout for the initial DB connection      |
 | `AUTH_JWKS_URL`             | *(required)*                 | auth-service's public key endpoint, used to verify access tokens |
-| `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on upload |
-| `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on upload |
+| `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on attach |
+| `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on attach |
 | `MAX_UPLOAD_SIZE_BYTES`     | `15728640` (15MB)            | Maximum size of a single uploaded file    |
 | `TEST_DATABASE_URL`         | *(unset)*                    | Used only by `make test-integration`, never by the app |
 
@@ -108,7 +113,7 @@ api/openapi.yaml                 API contract
 migrations/                      SQL migrations (golang-migrate format)
 internal/
   domain/media/                     Media entity, Repository port; no infrastructure dependency
-  application/media/                 use cases: upload, get, download, list, delete;
+  application/media/                 use cases: upload, attach, get, download, list, delete;
                                      ApiaryVerifier/HiveVerifier ports (ownership checks)
   platform/apiaryclient/           ApiaryVerifier implemented by calling apiary-service over HTTP
   platform/hiveclient/             HiveVerifier implemented by calling hive-service over HTTP
@@ -125,33 +130,48 @@ shared by every BeeBase service.
 
 ## Ownership
 
-A file belongs to exactly one owner (an apiary or a hive) and, through
-it, one user. Ownership is enforced in two layers:
+A file always belongs to exactly one user (whoever uploaded it), and
+optionally, once attached, to one owner (an apiary or a hive) as well.
+Ownership is enforced in two layers:
 
-1. **On upload**, this service forwards the caller's own access token to
-   apiary-service's or hive-service's `GET /api/v1/{apiaries,hives}/{id}`
-   (whichever `owner_type` selects) and trusts the answer: a 200 means
-   whoever holds that token owns that entity, a 404 means they don't (or
-   it doesn't exist) — collapsed into the same `404 {apiary,hive}_not_found`
-   response either way, so an entity's existence can't be probed. This
-   service never queries apiary/hive ownership itself.
-2. The verified owner's user ID is then denormalized onto the media row.
-   Every later read/write (`Get`, `Download`, `List`, `Delete`) scopes its
-   SQL by that `user_id` directly — no cross-service call is needed after
-   upload, since `owner_id` is immutable and ownership can't change out
-   from under a file. A request for another user's media returns the same
-   `404 media_not_found` as one that doesn't exist, never a `403`.
+1. **On upload**, the caller's user ID (from their verified access token)
+   is set directly on the media row — no apiary or hive is involved yet,
+   so no cross-service call happens here. `owner_type`/`owner_id` are both
+   `null` until the file is attached.
+2. **On attach** (`POST /api/v1/media/{id}/attach`), this service forwards
+   the caller's own access token to apiary-service's or hive-service's
+   `GET /api/v1/{apiaries,hives}/{id}` (whichever `owner_type` selects)
+   and trusts the answer: a 200 means whoever holds that token owns that
+   entity, a 404 means they don't (or it doesn't exist) — collapsed into
+   the same `404 {apiary,hive}_not_found` response either way, so an
+   entity's existence can't be probed. This service never queries
+   apiary/hive ownership itself. Once set, `owner_type`/`owner_id` are
+   immutable: attach is idempotent for the *same* owner (a safe retry),
+   but attaching media already linked to a *different* owner fails with
+   `409 already_attached` — there's no "move" operation.
+
+Every read/write after attach (`Get`, `Download`, `List`, `Delete`) scopes
+its SQL by `user_id` directly — no cross-service call is needed on those,
+since ownership can't change out from under a file once attached. A
+request for another user's media returns the same `404 media_not_found`
+as one that doesn't exist, never a `403`.
 
 Deletes are soft on the metadata row (`deleted_at` is set, the row is
 retained) per the project's offline-sync plan — media is a synchronizable
 entity — but the stored file content is removed immediately to reclaim
 storage.
 
-**Known limitation:** if an apiary or hive is deleted, its media here is
-not cascade-deleted or notified — there's no event bus or outbox between
-services yet (CLAUDE.md defers full synchronization). That media becomes
-orphaned but remains independently accessible to its owner until this is
-addressed.
+**Known limitations:**
+- If an apiary or hive is deleted, its media here is cascade-deleted via
+  `DELETE /api/v1/media?owner_type=&owner_id=`, called by
+  apiary-service/hive-service as part of their own delete — but this
+  is a best-effort HTTP call, not a distributed transaction, so a crash
+  mid-cascade can still leave orphaned media (CLAUDE.md defers full
+  synchronization; there's no event bus or outbox yet).
+- Media that's uploaded but never attached to anything has no cleanup
+  path yet — it stays independently accessible to its uploader
+  indefinitely. A TTL-based sweep for long-unattached uploads is a
+  reasonable follow-up if this becomes a real storage concern.
 
 ## Storage
 
@@ -215,8 +235,8 @@ make build              # build binary into bin/
 ### Integration tests
 
 Integration tests exercise the PostgreSQL repository (including
-compression round-trips) and the full HTTP upload/get/download/delete
-flow — including a real JWKS round trip, fake apiary-service and
+compression round-trips) and the full HTTP upload/attach/get/download/
+delete flow — including a real JWKS round trip, fake apiary-service and
 hive-service standing in for the real cross-service ownership checks, and
 two independently authenticated users proving cross-user access is
 impossible — against a real database. They're gated on

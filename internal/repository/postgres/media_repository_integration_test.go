@@ -34,13 +34,29 @@ func newTestRepo(t *testing.T) *repopostgres.MediaRepository {
 	return repopostgres.NewMediaRepository(tx)
 }
 
+// createAndAttach is a small helper for the many tests that need an
+// already-attached media row as a fixture.
+func createAndAttach(t *testing.T, repo *repopostgres.MediaRepository, userID, ownerID uuid.UUID, ownerType, filename, contentType string, content []byte) *media.Media {
+	t.Helper()
+
+	m := media.New(uuid.New(), userID, filename, contentType, int64(len(content)))
+	if err := repo.Create(context.Background(), m, content); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	attached, err := repo.Attach(context.Background(), userID, m.ID, ownerType, ownerID)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	return attached
+}
+
 func TestMediaRepository_CreateAndGetByID(t *testing.T) {
 	repo := newTestRepo(t)
 	userID := uuid.New()
-	ownerID := uuid.New()
 	content := []byte("hello media service")
 
-	m := media.New(uuid.New(), userID, media.OwnerTypeApiary, ownerID, "note.txt", "text/plain", int64(len(content)))
+	m := media.New(uuid.New(), userID, "note.txt", "text/plain", int64(len(content)))
 	if err := repo.Create(context.Background(), m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -49,8 +65,11 @@ func TestMediaRepository_CreateAndGetByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	if got.OriginalFilename != "note.txt" || got.OwnerID != ownerID {
+	if got.OriginalFilename != "note.txt" {
 		t.Fatalf("GetByID returned %+v", got)
+	}
+	if got.IsAttached() {
+		t.Fatalf("a freshly created media row should be unattached, got %+v", got)
 	}
 }
 
@@ -60,7 +79,7 @@ func TestMediaRepository_GetByID_WrongOwnerReturnsNotFound(t *testing.T) {
 	other := uuid.New()
 	content := []byte("secret")
 
-	m := media.New(uuid.New(), owner, media.OwnerTypeHive, uuid.New(), "f.txt", "text/plain", int64(len(content)))
+	m := media.New(uuid.New(), owner, "f.txt", "text/plain", int64(len(content)))
 	if err := repo.Create(context.Background(), m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -81,7 +100,7 @@ func TestMediaRepository_CompressionRoundTrip_HighlyCompressible(t *testing.T) {
 	userID := uuid.New()
 	content := bytes.Repeat([]byte("beebase "), 10_000) // highly repetitive, compresses well
 
-	m := media.New(uuid.New(), userID, media.OwnerTypeApiary, uuid.New(), "notes.xml", "application/xml", int64(len(content)))
+	m := media.New(uuid.New(), userID, "notes.xml", "application/xml", int64(len(content)))
 	if err := repo.Create(context.Background(), m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -106,7 +125,7 @@ func TestMediaRepository_CompressionRoundTrip_Incompressible(t *testing.T) {
 		t.Fatalf("generate random content: %v", err)
 	}
 
-	m := media.New(uuid.New(), userID, media.OwnerTypeHive, uuid.New(), "blob.pdf", "application/pdf", int64(len(content)))
+	m := media.New(uuid.New(), userID, "blob.pdf", "application/pdf", int64(len(content)))
 	if err := repo.Create(context.Background(), m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -117,6 +136,93 @@ func TestMediaRepository_CompressionRoundTrip_Incompressible(t *testing.T) {
 	}
 	if !bytes.Equal(got, content) {
 		t.Fatalf("GetContent returned content that doesn't match the original random bytes")
+	}
+}
+
+// --- Attach tests ---
+
+func TestMediaRepository_Attach_Success(t *testing.T) {
+	repo := newTestRepo(t)
+	userID := uuid.New()
+	apiaryID := uuid.New()
+
+	m := media.New(uuid.New(), userID, "f.jpg", "image/jpeg", 3)
+	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	attached, err := repo.Attach(context.Background(), userID, m.ID, media.OwnerTypeApiary, apiaryID)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if attached.OwnerType == nil || *attached.OwnerType != media.OwnerTypeApiary || attached.OwnerID == nil || *attached.OwnerID != apiaryID {
+		t.Fatalf("Attach result owner = %v/%v, want apiary/%s", attached.OwnerType, attached.OwnerID, apiaryID)
+	}
+
+	got, err := repo.GetByID(context.Background(), userID, m.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.OwnerType == nil || *got.OwnerType != media.OwnerTypeApiary || got.OwnerID == nil || *got.OwnerID != apiaryID {
+		t.Fatalf("Attach did not persist: GetByID owner = %v/%v", got.OwnerType, got.OwnerID)
+	}
+}
+
+func TestMediaRepository_Attach_IdempotentReplay_SameOwner(t *testing.T) {
+	repo := newTestRepo(t)
+	userID := uuid.New()
+	apiaryID := uuid.New()
+
+	m := media.New(uuid.New(), userID, "f.jpg", "image/jpeg", 3)
+	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := repo.Attach(context.Background(), userID, m.ID, media.OwnerTypeApiary, apiaryID); err != nil {
+		t.Fatalf("first Attach: %v", err)
+	}
+	if _, err := repo.Attach(context.Background(), userID, m.ID, media.OwnerTypeApiary, apiaryID); err != nil {
+		t.Fatalf("retried Attach with the same owner: %v", err)
+	}
+}
+
+func TestMediaRepository_Attach_AlreadyAttachedToDifferentOwner(t *testing.T) {
+	repo := newTestRepo(t)
+	userID := uuid.New()
+
+	m := media.New(uuid.New(), userID, "f.jpg", "image/jpeg", 3)
+	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := repo.Attach(context.Background(), userID, m.ID, media.OwnerTypeApiary, uuid.New()); err != nil {
+		t.Fatalf("first Attach: %v", err)
+	}
+
+	if _, err := repo.Attach(context.Background(), userID, m.ID, media.OwnerTypeApiary, uuid.New()); err != media.ErrAlreadyAttached {
+		t.Fatalf("re-Attach to a different apiary: got %v, want ErrAlreadyAttached", err)
+	}
+}
+
+func TestMediaRepository_Attach_WrongOwnerReturnsNotFound(t *testing.T) {
+	repo := newTestRepo(t)
+	owner := uuid.New()
+	other := uuid.New()
+
+	m := media.New(uuid.New(), owner, "f.jpg", "image/jpeg", 3)
+	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := repo.Attach(context.Background(), other, m.ID, media.OwnerTypeApiary, uuid.New()); err != media.ErrNotFound {
+		t.Fatalf("Attach by non-owner: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestMediaRepository_Attach_UnknownIDReturnsNotFound(t *testing.T) {
+	repo := newTestRepo(t)
+
+	if _, err := repo.Attach(context.Background(), uuid.New(), uuid.New(), media.OwnerTypeApiary, uuid.New()); err != media.ErrNotFound {
+		t.Fatalf("Attach with unknown id: got %v, want ErrNotFound", err)
 	}
 }
 
@@ -131,10 +237,7 @@ func TestMediaRepository_ListByOwner_FiltersByOwnerTypeAndOwnerID(t *testing.T) 
 		if ownerType == media.OwnerTypeHive {
 			ownerID = hiveID
 		}
-		m := media.New(uuid.New(), userID, ownerType, ownerID, "f.jpg", "image/jpeg", 3)
-		if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
+		createAndAttach(t, repo, userID, ownerID, ownerType, "f.jpg", "image/jpeg", []byte("abc"))
 	}
 
 	items, total, err := repo.ListByOwner(context.Background(), userID, media.OwnerTypeApiary, apiaryID, pagination.Params{Page: 1, Limit: pagination.DefaultLimit})
@@ -145,7 +248,7 @@ func TestMediaRepository_ListByOwner_FiltersByOwnerTypeAndOwnerID(t *testing.T) 
 		t.Fatalf("ListByOwner(apiary) total=%d len=%d, want 2 and 2", total, len(items))
 	}
 	for _, it := range items {
-		if it.OwnerType != media.OwnerTypeApiary || it.OwnerID != apiaryID {
+		if it.OwnerType == nil || *it.OwnerType != media.OwnerTypeApiary || it.OwnerID == nil || *it.OwnerID != apiaryID {
 			t.Errorf("ListByOwner leaked %+v", it)
 		}
 	}
@@ -157,10 +260,7 @@ func TestMediaRepository_ListByOwner_Pagination(t *testing.T) {
 	ownerID := uuid.New()
 
 	for i := 0; i < 5; i++ {
-		m := media.New(uuid.New(), userID, media.OwnerTypeApiary, ownerID, "f.jpg", "image/jpeg", 3)
-		if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
-			t.Fatalf("Create %d: %v", i, err)
-		}
+		createAndAttach(t, repo, userID, ownerID, media.OwnerTypeApiary, "f.jpg", "image/jpeg", []byte("abc"))
 	}
 
 	page, total, err := repo.ListByOwner(context.Background(), userID, media.OwnerTypeApiary, ownerID, pagination.Params{Page: 1, Limit: 2})
@@ -177,7 +277,7 @@ func TestMediaRepository_Delete_SoftDeletesAndRemovesBlob(t *testing.T) {
 	userID := uuid.New()
 	content := []byte("gone soon")
 
-	m := media.New(uuid.New(), userID, media.OwnerTypeApiary, uuid.New(), "f.txt", "text/plain", int64(len(content)))
+	m := media.New(uuid.New(), userID, "f.txt", "text/plain", int64(len(content)))
 	if err := repo.Create(context.Background(), m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -200,7 +300,7 @@ func TestMediaRepository_Delete_WrongOwnerReturnsNotFound(t *testing.T) {
 	other := uuid.New()
 	content := []byte("owner's file")
 
-	m := media.New(uuid.New(), owner, media.OwnerTypeApiary, uuid.New(), "f.txt", "text/plain", int64(len(content)))
+	m := media.New(uuid.New(), owner, "f.txt", "text/plain", int64(len(content)))
 	if err := repo.Create(context.Background(), m, content); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -228,20 +328,13 @@ func TestMediaRepository_DeleteByOwner_HardDeletesOnlyThatOwnersMedia(t *testing
 	hiveID := uuid.New()
 	apiaryID := uuid.New()
 
-	inHive1 := media.New(uuid.New(), userID, media.OwnerTypeHive, hiveID, "f1.jpg", "image/jpeg", 3)
-	inHive2 := media.New(uuid.New(), userID, media.OwnerTypeHive, hiveID, "f2.jpg", "image/jpeg", 3)
-	forApiary := media.New(uuid.New(), userID, media.OwnerTypeApiary, apiaryID, "f3.jpg", "image/jpeg", 3)
-	for _, m := range []*media.Media{inHive1, inHive2, forApiary} {
-		if err := repo.Create(ctx, m, []byte("abc")); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-	}
+	inHive1 := createAndAttach(t, repo, userID, hiveID, media.OwnerTypeHive, "f1.jpg", "image/jpeg", []byte("abc"))
+	inHive2 := createAndAttach(t, repo, userID, hiveID, media.OwnerTypeHive, "f2.jpg", "image/jpeg", []byte("abc"))
+	forApiary := createAndAttach(t, repo, userID, apiaryID, media.OwnerTypeApiary, "f3.jpg", "image/jpeg", []byte("abc"))
+
 	// Already soft-deleted (via the single-item Delete) media under hiveID
 	// must still be purged: DeleteByOwner has no deleted_at filter.
-	alreadyGone := media.New(uuid.New(), userID, media.OwnerTypeHive, hiveID, "f4.jpg", "image/jpeg", 3)
-	if err := repo.Create(ctx, alreadyGone, []byte("abc")); err != nil {
-		t.Fatalf("Create already-gone: %v", err)
-	}
+	alreadyGone := createAndAttach(t, repo, userID, hiveID, media.OwnerTypeHive, "f4.jpg", "image/jpeg", []byte("abc"))
 	if err := repo.Delete(ctx, userID, alreadyGone.ID); err != nil {
 		t.Fatalf("Delete already-gone: %v", err)
 	}
@@ -281,10 +374,7 @@ func TestMediaRepository_DeleteByOwner_ScopedToUser(t *testing.T) {
 	other := uuid.New()
 	apiaryID := uuid.New()
 
-	m := media.New(uuid.New(), owner, media.OwnerTypeApiary, apiaryID, "f.jpg", "image/jpeg", 3)
-	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	m := createAndAttach(t, repo, owner, apiaryID, media.OwnerTypeApiary, "f.jpg", "image/jpeg", []byte("abc"))
 
 	count, err := repo.DeleteByOwner(context.Background(), other, media.OwnerTypeApiary, apiaryID)
 	if err != nil {
@@ -317,12 +407,12 @@ func TestMediaRepository_Create_IDConflict(t *testing.T) {
 	owner := uuid.New()
 	other := uuid.New()
 
-	m1 := media.New(id, owner, media.OwnerTypeApiary, uuid.New(), "f.txt", "text/plain", 3)
+	m1 := media.New(id, owner, "f.txt", "text/plain", 3)
 	if err := repo.Create(context.Background(), m1, []byte("abc")); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 
-	m2 := media.New(id, other, media.OwnerTypeApiary, uuid.New(), "g.txt", "text/plain", 3)
+	m2 := media.New(id, other, "g.txt", "text/plain", 3)
 	if err := repo.Create(context.Background(), m2, []byte("xyz")); err != media.ErrIDConflict {
 		t.Fatalf("second Create with the same id: got %v, want ErrIDConflict", err)
 	}

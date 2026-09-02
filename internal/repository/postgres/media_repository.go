@@ -81,6 +81,37 @@ func (r *MediaRepository) Create(ctx context.Context, m *media.Media, content []
 	return nil
 }
 
+// Attach implements domain/media.Repository.
+func (r *MediaRepository) Attach(ctx context.Context, userID, mediaID uuid.UUID, ownerType string, ownerID uuid.UUID) (*media.Media, error) {
+	const q = `
+		UPDATE media
+		SET owner_type = $1, owner_id = $2, updated_at = now()
+		WHERE id = $3 AND user_id = $4 AND deleted_at IS NULL AND owner_type IS NULL
+	`
+
+	tag, err := r.db.Exec(ctx, q, ownerType, ownerID, mediaID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: attach media: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return r.GetByID(ctx, userID, mediaID)
+	}
+
+	// Nothing was updated: mediaID might not exist or not belong to
+	// userID (GetByID reports ErrNotFound for both, indistinguishably),
+	// or it might already be attached - either to this same owner
+	// already (idempotent success) or to a different one
+	// (ErrAlreadyAttached).
+	m, err := r.GetByID(ctx, userID, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	if m.OwnerType != nil && *m.OwnerType == ownerType && m.OwnerID != nil && *m.OwnerID == ownerID {
+		return m, nil
+	}
+	return nil, media.ErrAlreadyAttached
+}
+
 func (r *MediaRepository) GetByID(ctx context.Context, userID, mediaID uuid.UUID) (*media.Media, error) {
 	const q = `
 		SELECT id, user_id, owner_type, owner_id, original_filename, content_type, size_bytes, status, created_at, updated_at, deleted_at

@@ -13,12 +13,13 @@ import (
 // the owning userID alongside the media ID, so ownership is enforced by
 // the query itself, not by a separate check layered on top.
 //
-// UserID is denormalized onto the media row rather than looked up via
-// OwnerType/OwnerID on every call: apiary-service/hive-service (different
-// services, different databases) are the only source of truth for that
-// ownership, and are asked exactly once, at upload time. OwnerType/
-// OwnerID never change after that, so the denormalized UserID stays
-// correct without a cross-service call on every read.
+// UserID is set directly from the uploader's own verified token at
+// upload time - it's never looked up via apiary-service/hive-service, so
+// it's available immediately, before a media item is ever attached to
+// anything. OwnerType/OwnerID, once set by Attach, are immutable
+// afterward (apiary-service/hive-service confirmed that ownership exactly
+// once, at attach time), so no cross-service call is needed on later
+// reads.
 //
 // How file content is physically stored (today: gzip-compressed bytes in
 // a PostgreSQL table, see the postgres implementation) is entirely an
@@ -29,6 +30,14 @@ type Repository interface {
 	// belongs to an existing row, it returns ErrIDConflict.
 	Create(ctx context.Context, m *Media, content []byte) error
 	GetByID(ctx context.Context, userID, mediaID uuid.UUID) (*Media, error)
+	// Attach links mediaID (which must belong to userID and not already
+	// be deleted) to ownerType/ownerID, and returns the updated row.
+	// Calling it again with the same owner is a no-op success (not an
+	// error) - important for safely retrying after a network failure.
+	// Attaching a media item that's already linked to a *different*
+	// owner returns ErrAlreadyAttached; an unknown or not-owned mediaID
+	// returns ErrNotFound.
+	Attach(ctx context.Context, userID, mediaID uuid.UUID, ownerType string, ownerID uuid.UUID) (*Media, error)
 	// GetContent returns the media's metadata alongside its raw (already
 	// decompressed) file content.
 	GetContent(ctx context.Context, userID, mediaID uuid.UUID) (*Media, []byte, error)

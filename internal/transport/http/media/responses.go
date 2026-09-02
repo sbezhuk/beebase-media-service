@@ -13,15 +13,18 @@ import (
 // key, no path) - only GET /api/v1/media/{id}/download can retrieve
 // content, and only for a file the caller owns.
 type Response struct {
-	ID               uuid.UUID `json:"id"`
-	OwnerType        string    `json:"owner_type"`
-	OwnerID          uuid.UUID `json:"owner_id"`
-	OriginalFilename string    `json:"original_filename"`
-	ContentType      string    `json:"content_type"`
-	SizeBytes        int64     `json:"size_bytes"`
-	Status           string    `json:"status"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID uuid.UUID `json:"id"`
+	// OwnerType and OwnerID are both nil, or both set - never one
+	// without the other. Nil means the media hasn't been attached to an
+	// apiary or hive yet; see POST /media/{id}/attach.
+	OwnerType        *string    `json:"owner_type"`
+	OwnerID          *uuid.UUID `json:"owner_id"`
+	OriginalFilename string     `json:"original_filename"`
+	ContentType      string     `json:"content_type"`
+	SizeBytes        int64      `json:"size_bytes"`
+	Status           string     `json:"status"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 func newResponse(m *media.Media) Response {

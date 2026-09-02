@@ -16,3 +16,10 @@ var ErrNotFound = errors.New("media not found")
 // replay (same user, same ID) from a genuine conflict (someone else's
 // ID) by following up with GetByID.
 var ErrIDConflict = errors.New("media id already in use")
+
+// ErrAlreadyAttached is returned by Attach when the media item is already
+// linked to a different owner than the one requested. Attach is
+// idempotent for the same owner (calling it again with the same
+// owner_type/owner_id is a no-op success), but a media item's owner is
+// otherwise immutable once set - there's no "move" operation.
+var ErrAlreadyAttached = errors.New("media already attached to a different owner")
