@@ -39,3 +39,11 @@ require (
 	golang.org/x/text v0.29.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+// TODO(BEEB-39): temporary, for local build/test only - points at the
+// working-tree beebase-common so the new medialink package (not yet
+// tagged/published) resolves. Remove this once beebase-common has a
+// tagged release containing medialink and bump the require above to it;
+// Docker builds each service from its own directory, so this relative
+// path does not resolve inside a container image.
+replace github.com/sbezhuk/beebase-common => ../beebase-common

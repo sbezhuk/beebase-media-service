@@ -102,6 +102,7 @@ All configuration is via environment variables (see
 | `DATABASE_URL`              | *(required)*                 | PostgreSQL DSN                            |
 | `DATABASE_CONNECT_TIMEOUT`  | `5s`                         | Timeout for the initial DB connection      |
 | `AUTH_JWKS_URL`             | *(required)*                 | auth-service's public key endpoint, used to verify access tokens |
+| `PUBLIC_BASE_URL`           | *(required)*                 | Gateway's externally reachable base URL, used to build each item's `image_url` |
 | `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on attach |
 | `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on attach |
 | `MAX_UPLOAD_SIZE_BYTES`     | `15728640` (15MB)            | Maximum size of a single uploaded file    |
@@ -203,7 +204,12 @@ client fetches or displays a file from; content is proxied through this
 service rather than a redirect to R2, which keeps authorization uniform
 with every other endpoint (one ownership-scoped DB lookup gates access)
 and means no R2-specific detail (bucket, object key, endpoint, a public
-URL) is ever exposed through the API.
+URL) is ever exposed through the API. Every response that includes a
+media item (this service's own `Response`, and apiary-service's/hive-
+service's `images`) carries a ready-to-use `image_url` pointing at this
+route, built by the shared `beebase-common/medialink` package from
+`PUBLIC_BASE_URL` - a client never constructs this URL itself from a raw
+id.
 
 A media row's R2 object key is derived deterministically from its id
 (`internal/platform/r2`'s `objectKey`, currently `media/<id>`) — Media ID

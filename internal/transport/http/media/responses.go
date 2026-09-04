@@ -5,14 +5,16 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sbezhuk/beebase-common/medialink"
 	"github.com/sbezhuk/beebase-media-service/internal/domain/media"
 )
 
 // Response is the public representation of a media row. It deliberately
 // never exposes how or where content is physically stored (no storage
-// key, no path) - only GET /api/v1/media/{id}/download can retrieve
-// content, and only for a file the caller owns. It has no notion of an
-// owning apiary/hive - that relationship lives entirely in
+// key, no path) - ImageURL always points at GET
+// /api/v1/media/{id}/download, the only route that can retrieve content,
+// and only for a file the caller owns. It has no notion of an owning
+// apiary/hive - that relationship lives entirely in
 // apiary-service's/hive-service's own responses (their `images` field).
 type Response struct {
 	ID               uuid.UUID `json:"id"`
@@ -20,26 +22,28 @@ type Response struct {
 	ContentType      string    `json:"content_type"`
 	SizeBytes        int64     `json:"size_bytes"`
 	Status           string    `json:"status"`
+	ImageURL         string    `json:"image_url"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
-func newResponse(m *media.Media) Response {
+func newResponse(m *media.Media, publicBaseURL string) Response {
 	return Response{
 		ID:               m.ID,
 		OriginalFilename: m.OriginalFilename,
 		ContentType:      m.ContentType,
 		SizeBytes:        m.SizeBytes,
 		Status:           m.Status,
+		ImageURL:         medialink.DownloadURL(publicBaseURL, m.ID),
 		CreatedAt:        m.CreatedAt,
 		UpdatedAt:        m.UpdatedAt,
 	}
 }
 
-func newListResponse(items []*media.Media) []Response {
+func newListResponse(items []*media.Media, publicBaseURL string) []Response {
 	out := make([]Response, len(items))
 	for i, m := range items {
-		out[i] = newResponse(m)
+		out[i] = newResponse(m, publicBaseURL)
 	}
 	return out
 }

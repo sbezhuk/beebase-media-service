@@ -44,12 +44,15 @@ type Handler struct {
 	service            *appmedia.Service
 	log                *slog.Logger
 	maxUploadSizeBytes int64
+	publicBaseURL      string
 }
 
 // NewHandler returns a Handler backed by service. maxUploadSizeBytes
-// bounds the total request body accepted by Upload.
-func NewHandler(service *appmedia.Service, log *slog.Logger, maxUploadSizeBytes int64) *Handler {
-	return &Handler{service: service, log: log, maxUploadSizeBytes: maxUploadSizeBytes}
+// bounds the total request body accepted by Upload. publicBaseURL is the
+// gateway's externally reachable base URL, used to build each response's
+// image_url.
+func NewHandler(service *appmedia.Service, log *slog.Logger, maxUploadSizeBytes int64, publicBaseURL string) *Handler {
+	return &Handler{service: service, log: log, maxUploadSizeBytes: maxUploadSizeBytes, publicBaseURL: publicBaseURL}
 }
 
 // Upload handles POST /media.
@@ -116,7 +119,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	if result.AlreadyExisted {
 		status = http.StatusOK
 	}
-	httpx.WriteJSON(w, status, newResponse(result.Media))
+	httpx.WriteJSON(w, status, newResponse(result.Media, h.publicBaseURL))
 }
 
 // Get handles GET /media/{mediaID}.
@@ -137,7 +140,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, newResponse(got))
+	httpx.WriteJSON(w, http.StatusOK, newResponse(got, h.publicBaseURL))
 }
 
 // Download handles GET /media/{mediaID}/download.
@@ -190,7 +193,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, ListResponse{Items: newListResponse(items)})
+	httpx.WriteJSON(w, http.StatusOK, ListResponse{Items: newListResponse(items, h.publicBaseURL)})
 }
 
 // Delete handles DELETE /media/{mediaID}.

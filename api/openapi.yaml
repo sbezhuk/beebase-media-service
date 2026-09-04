@@ -347,6 +347,15 @@ components:
         content_type: { type: string, example: image/jpeg }
         size_bytes: { type: integer, format: int64 }
         status: { type: string, enum: [available] }
+        image_url:
+          type: string
+          format: uri
+          description: >
+            The authenticated URL to fetch or display this item's
+            content from - always GET /media/{id}/download (this same
+            service, reverse-proxied by the gateway), built fresh on
+            every response from PUBLIC_BASE_URL. Prefer this field over
+            constructing the download URL from id yourself.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 

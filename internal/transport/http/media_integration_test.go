@@ -126,7 +126,7 @@ func newTestStack(t *testing.T) *testStack {
 	metadataRepo := repopostgres.NewMediaRepository(tx)
 	mediaRepo := mediarepo.New(metadataRepo, metadataRepo, newFakeBlobStore(), log)
 	mediaService := appmedia.NewService(mediaRepo, testMaxUploadSizeBytes)
-	handler := mediahttp.NewHandler(mediaService, log, testMaxUploadSizeBytes)
+	handler := mediahttp.NewHandler(mediaService, log, testMaxUploadSizeBytes, "http://localhost:8080")
 
 	router := transporthttp.NewRouter(log, pool, handler, verifier)
 

@@ -82,7 +82,7 @@ func run() error {
 	metadataRepo := repopostgres.NewMediaRepository(db)
 	mediaRepo := mediarepo.New(metadataRepo, metadataRepo, blobStore, log)
 	mediaService := appmedia.NewService(mediaRepo, cfg.MaxUploadSizeBytes)
-	mediaHandler := mediahttp.NewHandler(mediaService, log, cfg.MaxUploadSizeBytes)
+	mediaHandler := mediahttp.NewHandler(mediaService, log, cfg.MaxUploadSizeBytes, cfg.PublicBaseURL)
 
 	router := transporthttp.NewRouter(log, db, mediaHandler, verifier)
 

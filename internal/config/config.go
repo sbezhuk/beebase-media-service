@@ -29,6 +29,13 @@ type Config struct {
 	// ever holding a key that could mint one.
 	AuthJWKSURL string
 
+	// PublicBaseURL is the gateway's externally reachable base URL, used
+	// to build the image_url returned for each media item
+	// (PublicBaseURL + "/api/v1/media/{id}/download"). Unlike every other
+	// *_URL setting in this service, it must resolve for the client, not
+	// just for server-to-server calls.
+	PublicBaseURL string
+
 	// MaxUploadSizeBytes bounds how large a single uploaded file can be.
 	MaxUploadSizeBytes int64
 
@@ -60,7 +67,8 @@ func Load() (*Config, error) {
 
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
-		AuthJWKSURL: getEnv("AUTH_JWKS_URL", ""),
+		AuthJWKSURL:   getEnv("AUTH_JWKS_URL", ""),
+		PublicBaseURL: getEnv("PUBLIC_BASE_URL", ""),
 
 		MaxUploadSizeBytes: getInt64("MAX_UPLOAD_SIZE_BYTES", 15*1024*1024),
 
@@ -76,6 +84,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.AuthJWKSURL == "" {
 		return nil, fmt.Errorf("config: AUTH_JWKS_URL is required")
+	}
+	if cfg.PublicBaseURL == "" {
+		return nil, fmt.Errorf("config: PUBLIC_BASE_URL is required")
 	}
 	if cfg.R2Endpoint == "" {
 		return nil, fmt.Errorf("config: R2_ENDPOINT is required")
