@@ -3,10 +3,13 @@ FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
+# Build context is the repo root so the local beebase-common replace
+# directive in go.mod (../beebase-common) resolves inside the image too.
+COPY beebase-media-service/go.mod beebase-media-service/go.sum ./
+COPY beebase-common /beebase-common
 RUN go mod download
 
-COPY . .
+COPY beebase-media-service/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
 
 ## Runtime stage
