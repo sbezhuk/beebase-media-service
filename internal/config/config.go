@@ -30,9 +30,17 @@ type Config struct {
 	AuthJWKSURL string
 
 	// MaxUploadSizeBytes bounds how large a single uploaded file can be.
-	// File bytes are stored directly in PostgreSQL rows (see the README's
-	// Storage section), so this is kept conservative by default.
 	MaxUploadSizeBytes int64
+
+	// R2Endpoint is Cloudflare R2's jurisdiction-specific S3 API endpoint
+	// for the account (e.g. https://<account-hash>.r2.cloudflarestorage.com).
+	// File content is stored there, not in PostgreSQL - see the README's
+	// Storage section.
+	R2Endpoint        string
+	R2Bucket          string
+	R2AccessKeyID     string
+	R2SecretAccessKey string
+	R2ConnectTimeout  time.Duration
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -55,6 +63,12 @@ func Load() (*Config, error) {
 		AuthJWKSURL: getEnv("AUTH_JWKS_URL", ""),
 
 		MaxUploadSizeBytes: getInt64("MAX_UPLOAD_SIZE_BYTES", 15*1024*1024),
+
+		R2Endpoint:        getEnv("R2_ENDPOINT", ""),
+		R2Bucket:          getEnv("R2_BUCKET", ""),
+		R2AccessKeyID:     getEnv("R2_ACCESS_KEY_ID", ""),
+		R2SecretAccessKey: getEnv("R2_SECRET_ACCESS_KEY", ""),
+		R2ConnectTimeout:  getDuration("R2_CONNECT_TIMEOUT", 5*time.Second),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -62,6 +76,18 @@ func Load() (*Config, error) {
 	}
 	if cfg.AuthJWKSURL == "" {
 		return nil, fmt.Errorf("config: AUTH_JWKS_URL is required")
+	}
+	if cfg.R2Endpoint == "" {
+		return nil, fmt.Errorf("config: R2_ENDPOINT is required")
+	}
+	if cfg.R2Bucket == "" {
+		return nil, fmt.Errorf("config: R2_BUCKET is required")
+	}
+	if cfg.R2AccessKeyID == "" {
+		return nil, fmt.Errorf("config: R2_ACCESS_KEY_ID is required")
+	}
+	if cfg.R2SecretAccessKey == "" {
+		return nil, fmt.Errorf("config: R2_SECRET_ACCESS_KEY is required")
 	}
 
 	return cfg, nil

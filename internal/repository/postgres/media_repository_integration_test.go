@@ -3,9 +3,7 @@
 package postgres_test
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,10 +13,7 @@ import (
 )
 
 // newTestRepo starts a transaction on the shared test pool and returns a
-// repository backed by it, rolled back automatically at test end. Create
-// and Delete open their own nested transaction (a PostgreSQL savepoint)
-// via pgx.Tx.Begin, so they're exercised for real without leaving any row
-// behind once the outer transaction rolls back.
+// repository backed by it, rolled back automatically at test end.
 func newTestRepo(t *testing.T) *repopostgres.MediaRepository {
 	t.Helper()
 
@@ -36,10 +31,9 @@ func newTestRepo(t *testing.T) *repopostgres.MediaRepository {
 func TestMediaRepository_CreateAndGetByID(t *testing.T) {
 	repo := newTestRepo(t)
 	userID := uuid.New()
-	content := []byte("hello media service")
 
-	m := media.New(uuid.New(), userID, "note.txt", "text/plain", int64(len(content)))
-	if err := repo.Create(context.Background(), m, content); err != nil {
+	m := media.New(uuid.New(), userID, "note.txt", "text/plain", 20)
+	if err := repo.Create(context.Background(), m); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -56,65 +50,14 @@ func TestMediaRepository_GetByID_WrongOwnerReturnsNotFound(t *testing.T) {
 	repo := newTestRepo(t)
 	owner := uuid.New()
 	other := uuid.New()
-	content := []byte("secret")
 
-	m := media.New(uuid.New(), owner, "f.txt", "text/plain", int64(len(content)))
-	if err := repo.Create(context.Background(), m, content); err != nil {
+	m := media.New(uuid.New(), owner, "f.txt", "text/plain", 6)
+	if err := repo.Create(context.Background(), m); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	if _, err := repo.GetByID(context.Background(), other, m.ID); err != media.ErrNotFound {
 		t.Fatalf("GetByID by non-owner: got %v, want ErrNotFound", err)
-	}
-	if _, _, err := repo.GetContent(context.Background(), other, m.ID); err != media.ErrNotFound {
-		t.Fatalf("GetContent by non-owner: got %v, want ErrNotFound", err)
-	}
-}
-
-// TestMediaRepository_CompressionRoundTrip_HighlyCompressible proves a
-// text file - which compresses well - round-trips byte-for-byte and is
-// actually stored compressed.
-func TestMediaRepository_CompressionRoundTrip_HighlyCompressible(t *testing.T) {
-	repo := newTestRepo(t)
-	userID := uuid.New()
-	content := bytes.Repeat([]byte("beebase "), 10_000) // highly repetitive, compresses well
-
-	m := media.New(uuid.New(), userID, "notes.xml", "application/xml", int64(len(content)))
-	if err := repo.Create(context.Background(), m, content); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	_, got, err := repo.GetContent(context.Background(), userID, m.ID)
-	if err != nil {
-		t.Fatalf("GetContent: %v", err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Fatalf("GetContent returned %d bytes, want %d bytes matching the original", len(got), len(content))
-	}
-}
-
-// TestMediaRepository_CompressionRoundTrip_Incompressible proves random
-// (incompressible) bytes still round-trip correctly, stored uncompressed
-// since gzip wouldn't shrink them.
-func TestMediaRepository_CompressionRoundTrip_Incompressible(t *testing.T) {
-	repo := newTestRepo(t)
-	userID := uuid.New()
-	content := make([]byte, 4096)
-	if _, err := rand.Read(content); err != nil {
-		t.Fatalf("generate random content: %v", err)
-	}
-
-	m := media.New(uuid.New(), userID, "blob.pdf", "application/pdf", int64(len(content)))
-	if err := repo.Create(context.Background(), m, content); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	_, got, err := repo.GetContent(context.Background(), userID, m.ID)
-	if err != nil {
-		t.Fatalf("GetContent: %v", err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Fatalf("GetContent returned content that doesn't match the original random bytes")
 	}
 }
 
@@ -127,7 +70,7 @@ func TestMediaRepository_ListByIDs_ReturnsOnlyCallersOwnMatchingIDs(t *testing.T
 	mine2 := media.New(uuid.New(), userID, "2.jpg", "image/jpeg", 3)
 	notMine := media.New(uuid.New(), otherUserID, "3.jpg", "image/jpeg", 3)
 	for _, m := range []*media.Media{mine1, mine2, notMine} {
-		if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+		if err := repo.Create(context.Background(), m); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -158,7 +101,7 @@ func TestMediaRepository_ListByIDs_EmptyIDsReturnsEmptySlice(t *testing.T) {
 	}
 }
 
-func TestMediaRepository_Delete_HardDeletesRowAndBlob(t *testing.T) {
+func TestMediaRepository_Delete_HardDeletesRow(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 
@@ -170,10 +113,9 @@ func TestMediaRepository_Delete_HardDeletesRowAndBlob(t *testing.T) {
 
 	repo := repopostgres.NewMediaRepository(tx)
 	userID := uuid.New()
-	content := []byte("gone soon")
 
-	m := media.New(uuid.New(), userID, "f.txt", "text/plain", int64(len(content)))
-	if err := repo.Create(ctx, m, content); err != nil {
+	m := media.New(uuid.New(), userID, "f.txt", "text/plain", 9)
+	if err := repo.Create(ctx, m); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -184,9 +126,6 @@ func TestMediaRepository_Delete_HardDeletesRowAndBlob(t *testing.T) {
 	if _, err := repo.GetByID(ctx, userID, m.ID); err != media.ErrNotFound {
 		t.Fatalf("GetByID after Delete: got %v, want ErrNotFound", err)
 	}
-	if _, _, err := repo.GetContent(ctx, userID, m.ID); err != media.ErrNotFound {
-		t.Fatalf("GetContent after Delete: got %v, want ErrNotFound", err)
-	}
 
 	var n int
 	if err := tx.QueryRow(ctx, "SELECT count(*) FROM media WHERE id = $1", m.ID).Scan(&n); err != nil {
@@ -195,18 +134,12 @@ func TestMediaRepository_Delete_HardDeletesRowAndBlob(t *testing.T) {
 	if n != 0 {
 		t.Errorf("media %s still present after Delete; want fully removed", m.ID)
 	}
-	if err := tx.QueryRow(ctx, "SELECT count(*) FROM media_blobs WHERE media_id = $1", m.ID).Scan(&n); err != nil {
-		t.Fatalf("raw count for media_blobs: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("media_blobs %s still present after Delete; want cascaded away", m.ID)
-	}
 
 	// The id is fully free again: a new upload can reuse it, unlike a
 	// soft-delete which would leave it permanently taken by the (hidden)
 	// old row.
 	m2 := media.New(m.ID, userID, "f2.txt", "text/plain", 3)
-	if err := repo.Create(ctx, m2, []byte("abc")); err != nil {
+	if err := repo.Create(ctx, m2); err != nil {
 		t.Fatalf("Create reusing a hard-deleted id: %v", err)
 	}
 }
@@ -215,10 +148,9 @@ func TestMediaRepository_Delete_WrongOwnerReturnsNotFound(t *testing.T) {
 	repo := newTestRepo(t)
 	owner := uuid.New()
 	other := uuid.New()
-	content := []byte("owner's file")
 
-	m := media.New(uuid.New(), owner, "f.txt", "text/plain", int64(len(content)))
-	if err := repo.Create(context.Background(), m, content); err != nil {
+	m := media.New(uuid.New(), owner, "f.txt", "text/plain", 12)
+	if err := repo.Create(context.Background(), m); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -230,7 +162,7 @@ func TestMediaRepository_Delete_WrongOwnerReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDs(t *testing.T) {
+func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDsAndReturnsThem(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 
@@ -245,7 +177,7 @@ func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDs(t *testing.T) {
 
 	create := func(filename string) *media.Media {
 		m := media.New(uuid.New(), userID, filename, "image/jpeg", 3)
-		if err := repo.Create(ctx, m, []byte("abc")); err != nil {
+		if err := repo.Create(ctx, m); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		return m
@@ -256,19 +188,26 @@ func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDs(t *testing.T) {
 	keep := create("f3.jpg")
 
 	// An id that's already gone (hard-deleted via the single-item Delete,
-	// or never created at all) simply contributes nothing to the count -
+	// or never created at all) simply contributes nothing to the result -
 	// never an error.
 	alreadyGone := create("f4.jpg")
 	if err := repo.Delete(ctx, userID, alreadyGone.ID); err != nil {
 		t.Fatalf("Delete already-gone: %v", err)
 	}
 
-	count, err := repo.DeleteByIDs(ctx, userID, []uuid.UUID{toDelete1.ID, toDelete2.ID, alreadyGone.ID})
+	deleted, err := repo.DeleteByIDs(ctx, userID, []uuid.UUID{toDelete1.ID, toDelete2.ID, alreadyGone.ID})
 	if err != nil {
 		t.Fatalf("DeleteByIDs: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("DeleteByIDs count = %d, want 2", count)
+	if len(deleted) != 2 {
+		t.Fatalf("DeleteByIDs returned %d ids, want 2: %v", len(deleted), deleted)
+	}
+	deletedSet := map[uuid.UUID]bool{}
+	for _, id := range deleted {
+		deletedSet[id] = true
+	}
+	if !deletedSet[toDelete1.ID] || !deletedSet[toDelete2.ID] {
+		t.Fatalf("DeleteByIDs returned %v, want exactly [%s, %s]", deleted, toDelete1.ID, toDelete2.ID)
 	}
 
 	for _, id := range []uuid.UUID{toDelete1.ID, toDelete2.ID, alreadyGone.ID} {
@@ -278,12 +217,6 @@ func TestMediaRepository_DeleteByIDs_HardDeletesOnlyTheGivenIDs(t *testing.T) {
 		}
 		if n != 0 {
 			t.Errorf("media %s still present after DeleteByIDs; want fully removed", id)
-		}
-		if err := tx.QueryRow(ctx, "SELECT count(*) FROM media_blobs WHERE media_id = $1", id).Scan(&n); err != nil {
-			t.Fatalf("raw count for media_blobs: %v", err)
-		}
-		if n != 0 {
-			t.Errorf("media_blobs %s still present after DeleteByIDs; want cascaded away", id)
 		}
 	}
 
@@ -298,16 +231,16 @@ func TestMediaRepository_DeleteByIDs_ScopedToUser(t *testing.T) {
 	other := uuid.New()
 
 	m := media.New(uuid.New(), owner, "f.jpg", "image/jpeg", 3)
-	if err := repo.Create(context.Background(), m, []byte("abc")); err != nil {
+	if err := repo.Create(context.Background(), m); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	count, err := repo.DeleteByIDs(context.Background(), other, []uuid.UUID{m.ID})
+	deleted, err := repo.DeleteByIDs(context.Background(), other, []uuid.UUID{m.ID})
 	if err != nil {
 		t.Fatalf("DeleteByIDs by non-owner: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("DeleteByIDs by non-owner count = %d, want 0", count)
+	if len(deleted) != 0 {
+		t.Fatalf("DeleteByIDs by non-owner returned %v, want none", deleted)
 	}
 
 	if _, err := repo.GetByID(context.Background(), owner, m.ID); err != nil {
@@ -318,12 +251,12 @@ func TestMediaRepository_DeleteByIDs_ScopedToUser(t *testing.T) {
 func TestMediaRepository_DeleteByIDs_EmptyIDsIsNotAnError(t *testing.T) {
 	repo := newTestRepo(t)
 
-	count, err := repo.DeleteByIDs(context.Background(), uuid.New(), nil)
+	deleted, err := repo.DeleteByIDs(context.Background(), uuid.New(), nil)
 	if err != nil {
 		t.Fatalf("DeleteByIDs with no ids: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("count = %d, want 0", count)
+	if len(deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", deleted)
 	}
 }
 
@@ -334,12 +267,54 @@ func TestMediaRepository_Create_IDConflict(t *testing.T) {
 	other := uuid.New()
 
 	m1 := media.New(id, owner, "f.txt", "text/plain", 3)
-	if err := repo.Create(context.Background(), m1, []byte("abc")); err != nil {
+	if err := repo.Create(context.Background(), m1); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 
 	m2 := media.New(id, other, "g.txt", "text/plain", 3)
-	if err := repo.Create(context.Background(), m2, []byte("xyz")); err != media.ErrIDConflict {
+	if err := repo.Create(context.Background(), m2); err != media.ErrIDConflict {
 		t.Fatalf("second Create with the same id: got %v, want ErrIDConflict", err)
+	}
+}
+
+// --- Legacy blob fallback tests (migration-window read path) ---
+
+func TestMediaRepository_GetLegacyContent_NotFoundWhenNeverStoredThatWay(t *testing.T) {
+	repo := newTestRepo(t)
+
+	if _, err := repo.GetLegacyContent(context.Background(), uuid.New()); err != media.ErrBlobNotFound {
+		t.Fatalf("GetLegacyContent for an unknown id: got %v, want ErrBlobNotFound", err)
+	}
+}
+
+func TestMediaRepository_GetLegacyContent_ReturnsDecompressedContent(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+
+	repo := repopostgres.NewMediaRepository(tx)
+	userID := uuid.New()
+	m := media.New(uuid.New(), userID, "old.txt", "text/plain", 5)
+	if err := repo.Create(ctx, m); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Insert directly, the way the pre-R2 repository used to, to simulate
+	// content the migration hasn't reached yet.
+	if _, err := tx.Exec(ctx, `INSERT INTO media_blobs (media_id, data, compressed) VALUES ($1, $2, false)`, m.ID, []byte("legacy")); err != nil {
+		t.Fatalf("seed legacy blob: %v", err)
+	}
+
+	got, err := repo.GetLegacyContent(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("GetLegacyContent: %v", err)
+	}
+	if string(got) != "legacy" {
+		t.Fatalf("GetLegacyContent = %q, want %q", got, "legacy")
 	}
 }

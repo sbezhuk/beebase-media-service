@@ -1,12 +1,9 @@
 package postgres
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,42 +16,35 @@ import (
 // constraint violation (23505), used to detect an ID collision on Create.
 const pgUniqueViolation = "23505"
 
-// MediaRepository implements domain/media.Repository against PostgreSQL.
-// Every method scopes its query by user_id, so a user can never read or
-// write media they don't own: there's no separate ownership-check step to
-// forget.
+// MediaRepository implements the metadata half of domain/media.Repository
+// against PostgreSQL: the media table only. File content lives in a
+// media.BlobStore (Cloudflare R2 in production, see internal/platform/r2)
+// - internal/repository/media.Repository composes the two into the full
+// domain/media.Repository port, so nothing above that composite knows
+// metadata and content are stored in different places.
 //
-// File content is stored directly in PostgreSQL (a media_blobs table,
-// kept separate from media's own metadata columns so list/get queries
-// never touch blob data), gzip-compressed when that actually shrinks the
-// payload. This is an MVP choice to avoid a paid object-storage
-// dependency; nothing outside this file knows bytes are stored this way,
-// so swapping in an S3-backed implementation later is a contained change.
+// media_blobs, the pre-R2 table that used to hold file content directly
+// in PostgreSQL, still exists purely as the migration's bookkeeping: a
+// remaining row there means that media id's content hasn't been moved to
+// R2 yet (see GetLegacyContent, and LegacyBlobStore in
+// legacy_blob_store.go). Every method here otherwise ignores it.
 type MediaRepository struct {
-	db Beginner
+	db Querier
 }
 
 // NewMediaRepository returns a MediaRepository backed by db.
-func NewMediaRepository(db Beginner) *MediaRepository {
+func NewMediaRepository(db Querier) *MediaRepository {
 	return &MediaRepository{db: db}
 }
 
-// Create persists m and content together in one transaction, so a media
-// row can never exist without its content (or vice versa).
-func (r *MediaRepository) Create(ctx context.Context, m *media.Media, content []byte) error {
-	data, compressed := compress(content)
-
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("postgres: begin create media tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	const insertMedia = `
+// Create persists m's metadata. If m.ID already belongs to an existing
+// row, it returns media.ErrIDConflict.
+func (r *MediaRepository) Create(ctx context.Context, m *media.Media) error {
+	const q = `
 		INSERT INTO media (id, user_id, original_filename, content_type, size_bytes, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
-	_, err = tx.Exec(ctx, insertMedia,
+	_, err := r.db.Exec(ctx, q,
 		m.ID, m.UserID, m.OriginalFilename, m.ContentType, m.SizeBytes, m.Status, m.CreatedAt, m.UpdatedAt,
 	)
 	if err != nil {
@@ -63,18 +53,6 @@ func (r *MediaRepository) Create(ctx context.Context, m *media.Media, content []
 			return media.ErrIDConflict
 		}
 		return fmt.Errorf("postgres: create media: %w", err)
-	}
-
-	const insertBlob = `
-		INSERT INTO media_blobs (media_id, data, compressed)
-		VALUES ($1, $2, $3)
-	`
-	if _, err := tx.Exec(ctx, insertBlob, m.ID, data, compressed); err != nil {
-		return fmt.Errorf("postgres: create media blob: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("postgres: commit create media tx: %w", err)
 	}
 
 	return nil
@@ -99,35 +77,6 @@ func (r *MediaRepository) GetByID(ctx context.Context, userID, mediaID uuid.UUID
 	}
 
 	return &m, nil
-}
-
-func (r *MediaRepository) GetContent(ctx context.Context, userID, mediaID uuid.UUID) (*media.Media, []byte, error) {
-	m, err := r.GetByID(ctx, userID, mediaID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	const q = `SELECT data, compressed FROM media_blobs WHERE media_id = $1`
-
-	var data []byte
-	var compressed bool
-	if err := r.db.QueryRow(ctx, q, mediaID).Scan(&data, &compressed); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The metadata row exists but its blob is missing. This
-			// should be unreachable given Create/Delete keep the two in
-			// one transaction; surfaced as a hard error rather than a 404
-			// so it doesn't look like a client mistake.
-			return nil, nil, fmt.Errorf("postgres: media %s has no stored content", mediaID)
-		}
-		return nil, nil, fmt.Errorf("postgres: get media content: %w", err)
-	}
-
-	content, err := decompress(data, compressed)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return m, content, nil
 }
 
 // ListByIDs implements domain/media.Repository with a single query against
@@ -165,9 +114,10 @@ func (r *MediaRepository) ListByIDs(ctx context.Context, userID uuid.UUID, ids [
 	return items, nil
 }
 
-// Delete hard-deletes the media row belonging to userID; the media_blobs
-// FK's ON DELETE CASCADE removes its stored content as part of the same
-// statement.
+// Delete hard-deletes the media row belonging to userID. Its media_blobs
+// row, if any (only present for media the R2 migration hasn't reached
+// yet), cascades away via the table's ON DELETE CASCADE FK as part of the
+// same statement.
 func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID) error {
 	const q = `DELETE FROM media WHERE id = $1 AND user_id = $2`
 
@@ -183,58 +133,61 @@ func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID)
 }
 
 // DeleteByIDs hard-deletes every row in ids belonging to userID in one
-// statement; the media_blobs FK is ON DELETE CASCADE, so each row's blob
-// is removed automatically as part of the same DELETE.
-func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error) {
+// statement, returning the ids actually deleted so the caller can clean up
+// their stored content too. media_blobs rows, where still present, cascade
+// away via the table's ON DELETE CASCADE FK as part of the same statement.
+func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]uuid.UUID, error) {
 	if len(ids) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
-	const q = `DELETE FROM media WHERE id = ANY($1) AND user_id = $2`
+	const q = `DELETE FROM media WHERE id = ANY($1) AND user_id = $2 RETURNING id`
 
-	tag, err := r.db.Exec(ctx, q, ids, userID)
+	rows, err := r.db.Query(ctx, q, ids, userID)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: delete media by ids: %w", err)
+		return nil, fmt.Errorf("postgres: delete media by ids: %w", err)
+	}
+	defer rows.Close()
+
+	var deleted []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: scan deleted media id: %w", err)
+		}
+		deleted = append(deleted, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: delete media by ids: %w", err)
 	}
 
-	return tag.RowsAffected(), nil
+	return deleted, nil
 }
 
-// compress gzip-compresses content, returning the compressed bytes and
-// true only if compression actually made it smaller. Already-compressed
-// formats like JPEG or PDF often don't shrink further; storing the raw
-// bytes in that case avoids paying gzip's framing overhead for nothing.
-func compress(content []byte) ([]byte, bool) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(content); err != nil {
-		return content, false
-	}
-	if err := gw.Close(); err != nil {
-		return content, false
+// GetLegacyContent returns mediaID's pre-R2, database-stored file content
+// (decompressed), or media.ErrBlobNotFound if there's none - either
+// because it was never stored that way, or because the background
+// migration has already moved it to R2 and removed the row. It's the
+// transitional fallback internal/repository/media.Repository.GetContent
+// uses while the migration is still in progress; see that type's doc
+// comment. Once the migration completes and media_blobs is dropped, this
+// method (and the fallback that calls it) can go away.
+func (r *MediaRepository) GetLegacyContent(ctx context.Context, mediaID uuid.UUID) ([]byte, error) {
+	const q = `SELECT data, compressed FROM media_blobs WHERE media_id = $1`
+
+	var data []byte
+	var compressed bool
+	if err := r.db.QueryRow(ctx, q, mediaID).Scan(&data, &compressed); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, media.ErrBlobNotFound
+		}
+		return nil, fmt.Errorf("postgres: get legacy media content: %w", err)
 	}
 
-	if buf.Len() >= len(content) {
-		return content, false
-	}
-	return buf.Bytes(), true
-}
-
-func decompress(data []byte, compressed bool) ([]byte, error) {
-	if !compressed {
-		return data, nil
-	}
-
-	gr, err := gzip.NewReader(bytes.NewReader(data))
+	content, err := decompress(data, compressed)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: gunzip media content: %w", err)
-	}
-	defer func() { _ = gr.Close() }()
-
-	out, err := io.ReadAll(gr)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: gunzip media content: %w", err)
+		return nil, err
 	}
 
-	return out, nil
+	return content, nil
 }

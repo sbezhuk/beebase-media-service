@@ -35,6 +35,8 @@ own attach/list endpoints.
   JWKS document) reachable at `AUTH_JWKS_URL`
 - A running `beebase-apiary-service` reachable at `APIARY_SERVICE_URL`
 - A running `beebase-hive-service` reachable at `HIVE_SERVICE_URL`
+- A Cloudflare R2 bucket and API token (`R2_ENDPOINT`, `R2_BUCKET`,
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) — see [Storage](#storage)
 
 ## Quick start
 
@@ -103,22 +105,33 @@ All configuration is via environment variables (see
 | `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on attach |
 | `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on attach |
 | `MAX_UPLOAD_SIZE_BYTES`     | `15728640` (15MB)            | Maximum size of a single uploaded file    |
+| `R2_ENDPOINT`               | *(required)*                 | Cloudflare R2's jurisdiction-specific S3 API endpoint for the account |
+| `R2_BUCKET`                 | *(required)*                 | R2 bucket file content is stored in       |
+| `R2_ACCESS_KEY_ID`          | *(required)*                 | R2 API token access key id                |
+| `R2_SECRET_ACCESS_KEY`      | *(required)*                 | R2 API token secret access key            |
+| `R2_CONNECT_TIMEOUT`        | `5s`                         | Timeout for the initial R2 connectivity check |
 | `TEST_DATABASE_URL`         | *(unset)*                    | Used only by `make test-integration`, never by the app |
 
 ## Project structure
 
 ```
-cmd/server/                    entry point: wires config, logger, db, services, server
+cmd/server/                    entry point: wires config, logger, db, r2, services, server
+cmd/migrate-media-blobs/         one-time (safely re-runnable) migration of existing media
+                                     content out of PostgreSQL and into R2 - see Storage below
 api/openapi.yaml                 API contract
 migrations/                      SQL migrations (golang-migrate format)
 internal/
-  domain/media/                     Media entity, Repository port; no infrastructure dependency
+  domain/media/                     Media entity, Repository + BlobStore ports; no infrastructure dependency
   application/media/                 use cases: upload, attach, get, download, list, delete;
                                      ApiaryVerifier/HiveVerifier ports (ownership checks)
   platform/apiaryclient/           ApiaryVerifier implemented by calling apiary-service over HTTP
   platform/hiveclient/             HiveVerifier implemented by calling hive-service over HTTP
-  repository/postgres/             domain port implemented against PostgreSQL (pgx, explicit SQL);
-                                     also owns file content storage (see Storage below)
+  platform/r2/                     BlobStore implemented against Cloudflare R2 (S3-compatible API)
+  repository/postgres/             media metadata (media table) against PostgreSQL (pgx, explicit
+                                     SQL); also the pre-R2 media_blobs migration's data access
+  repository/media/                composes the postgres metadata store + R2 BlobStore into the
+                                     full domain/media.Repository port - see Storage below
+  migration/blobmigrator/          the migration's actual algorithm, storage-agnostic
   transport/http/                 chi router, health/ready handlers
     media/                            media HTTP handlers, request validation, responses
 ```
@@ -172,28 +185,62 @@ storage.
   path yet — it stays independently accessible to its uploader
   indefinitely. A TTL-based sweep for long-unattached uploads is a
   reasonable follow-up if this becomes a real storage concern.
+- Keeping an R2 object and its metadata row in sync across two separate
+  systems is best-effort, not transactional (see [Storage](#storage)): a
+  failure at exactly the wrong moment (R2 delete fails right after its
+  metadata row is gone, or the reverse during Create) can leave an
+  orphaned, unreferenced R2 object behind. It's logged when it happens,
+  and it's harmless — nothing can ever reach it without a metadata row
+  pointing at it — but there's no automated sweep for it yet.
 
 ## Storage
 
-File bytes are stored directly in PostgreSQL — a `media_blobs` table,
-kept separate from `media`'s own metadata columns so list/get queries
-never touch blob data — gzip-compressed by the repository layer when that
-actually shrinks the payload (skipped for already-compressed formats like
-JPEG/PDF, which rarely benefit and would just pay gzip's framing
-overhead). `GET /api/v1/media/{id}/download` is the stable, authenticated
-URL a client fetches or displays a file from; content is proxied through
-this service rather than a redirect to an object store, which also keeps
-authorization uniform with every other endpoint (one ownership-scoped DB
-lookup gates access).
+File content is stored in **Cloudflare R2** (S3-compatible object
+storage); media metadata (filename, content type, size, timestamps)
+stays in PostgreSQL exactly as before, in the `media` table.
+`GET /api/v1/media/{id}/download` is the stable, authenticated URL a
+client fetches or displays a file from; content is proxied through this
+service rather than a redirect to R2, which keeps authorization uniform
+with every other endpoint (one ownership-scoped DB lookup gates access)
+and means no R2-specific detail (bucket, object key, endpoint, a public
+URL) is ever exposed through the API.
 
-This is a deliberate MVP choice: it avoids a paid S3/MinIO dependency and
-any object-storage credentials to manage. The trade-off is that every
-upload/download round-trips through PostgreSQL as a row read/write, so
-it's worth revisiting if usage grows beyond MVP scale. Nothing outside
-`internal/repository/postgres/media_repository.go` knows bytes are stored
-this way — `domain/media.Repository`'s `Create`/`GetContent` signatures
-just deal in `[]byte` — so swapping in an S3-backed implementation later
-is a contained change, not a rewrite.
+A media row's R2 object key is derived deterministically from its id
+(`internal/platform/r2`'s `objectKey`, currently `media/<id>`) — Media ID
+→ R2 Object Key → Media Binary — so no extra database column is needed to
+remember where a file lives, and retries/migrations are inherently
+idempotent per id.
+
+**Write ordering.** `internal/repository/media.Repository` composes the
+PostgreSQL metadata store and the R2 `BlobStore` into the
+`domain/media.Repository` port every use case depends on:
+
+- **Create** uploads to R2 first, via a conditional ("create if absent")
+  `PutObject`, and only persists the metadata row once that succeeds — so
+  a media row can never exist without its content actually being in R2,
+  and a colliding client-supplied id can never silently overwrite
+  someone else's bytes. If the metadata write then fails, the just-
+  uploaded object is deleted best-effort so nothing is left orphaned
+  without a reason.
+- **Delete/DeleteByIDs** remove the metadata row(s) first, then
+  best-effort delete the matching R2 object(s) — so a media id is
+  immediately gone from every caller's point of view even if the R2
+  delete itself is briefly unreachable (logged for later cleanup rather
+  than failing the request).
+
+**Migrating existing data.** `cmd/migrate-media-blobs`
+(`make migrate-blobs-to-r2`) is a one-time, safely re-runnable command
+that uploads every row still sitting in the pre-R2 `media_blobs` table to
+R2 and deletes that row once the upload is confirmed stored —
+`media_blobs`'s remaining rows are themselves the migration's "still to
+do" bookkeeping, so an interrupted or failed run can simply be restarted.
+While that migration is in progress, `GetContent` transparently falls
+back to reading straight from `media_blobs` for any id R2 doesn't have
+yet, so retrieval never breaks mid-migration. Once every row has been
+migrated, `media_blobs` (and this fallback) can be dropped in a follow-up
+migration - see `internal/migration/blobmigrator` for the algorithm and
+`internal/repository/postgres/legacy_blob_store.go` for the PostgreSQL
+side of it.
 
 ## Security
 
@@ -234,15 +281,20 @@ make build              # build binary into bin/
 
 ### Integration tests
 
-Integration tests exercise the PostgreSQL repository (including
-compression round-trips) and the full HTTP upload/attach/get/download/
-delete flow — including a real JWKS round trip, fake apiary-service and
-hive-service standing in for the real cross-service ownership checks, and
-two independently authenticated users proving cross-user access is
-impossible — against a real database. They're gated on
-`TEST_DATABASE_URL` and skip themselves (not fail) if it's unset, and
-every test runs inside a transaction that's rolled back afterward, so
-they never leave rows behind or need manual cleanup.
+Integration tests exercise the PostgreSQL metadata repository, the
+pre-R2 `media_blobs` migration path (`LegacyBlobStore` and
+`blobmigrator.Migrate` end-to-end against real PostgreSQL), and the full
+HTTP upload/attach/get/download/delete flow — including a real JWKS round
+trip, fake apiary-service and hive-service standing in for the real
+cross-service ownership checks, and two independently authenticated users
+proving cross-user access is impossible — against a real database. R2
+itself is stood in for by an in-memory `BlobStore` fake in these tests
+(see `internal/repository/media` for the unit tests that exercise R2
+failure handling specifically, against fakes); there's no integration
+test against a live R2 bucket. They're gated on `TEST_DATABASE_URL` and
+skip themselves (not fail) if it's unset, and every test runs inside a
+transaction that's rolled back afterward, so they never leave rows behind
+or need manual cleanup.
 
 ```bash
 docker compose up -d postgres

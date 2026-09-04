@@ -17,17 +17,18 @@ import (
 // apiary-service's/hive-service's own concern; this service never learns
 // about it.
 //
-// How file content is physically stored (today: gzip-compressed bytes in
-// a PostgreSQL table, see the postgres implementation) is entirely an
-// implementation detail of the concrete Repository: nothing above this
-// interface knows or cares.
+// How file content is physically stored (today: Cloudflare R2, behind
+// the BlobStore port; metadata itself is always PostgreSQL, see
+// internal/repository/media and internal/repository/postgres) is
+// entirely an implementation detail of the concrete Repository: nothing
+// above this interface knows or cares.
 type Repository interface {
 	// Create persists m's metadata and content together. If m.ID already
 	// belongs to an existing row, it returns ErrIDConflict.
 	Create(ctx context.Context, m *Media, content []byte) error
 	GetByID(ctx context.Context, userID, mediaID uuid.UUID) (*Media, error)
-	// GetContent returns the media's metadata alongside its raw (already
-	// decompressed) file content.
+	// GetContent returns the media's metadata alongside its raw file
+	// content.
 	GetContent(ctx context.Context, userID, mediaID uuid.UUID) (*Media, []byte, error)
 	// ListByIDs returns every media row in ids that belongs to userID and
 	// isn't deleted, in a single query. ids may contain duplicates or ids
@@ -37,12 +38,11 @@ type Repository interface {
 	ListByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*Media, error)
 	// Delete hard-deletes the media row and its stored content.
 	Delete(ctx context.Context, userID, mediaID uuid.UUID) error
-	// DeleteByIDs hard-deletes every row in ids belonging to userID (and,
-	// via the media_blobs FK's ON DELETE CASCADE, its stored content) in
-	// a single statement. Used by apiary-service/hive-service to cascade a
-	// delete across every media id an apiary/hive itself knows it
-	// references; ids not found (already gone, or never existed) are
-	// simply not counted, never an error - a zero count is a normal
-	// outcome, not an error.
+	// DeleteByIDs hard-deletes every row in ids belonging to userID, and
+	// its stored content, in one call. Used by apiary-service/hive-service
+	// to cascade a delete across every media id an apiary/hive itself
+	// knows it references (its own Images); ids not found (already gone,
+	// or never existed) are simply not counted, never an error - a zero
+	// count is a normal outcome, not an error.
 	DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error)
 }

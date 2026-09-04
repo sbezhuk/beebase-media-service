@@ -14,6 +14,8 @@ import (
 	appmedia "github.com/sbezhuk/beebase-media-service/internal/application/media"
 	"github.com/sbezhuk/beebase-media-service/internal/config"
 	"github.com/sbezhuk/beebase-media-service/internal/platform/postgres"
+	"github.com/sbezhuk/beebase-media-service/internal/platform/r2"
+	mediarepo "github.com/sbezhuk/beebase-media-service/internal/repository/media"
 	repopostgres "github.com/sbezhuk/beebase-media-service/internal/repository/postgres"
 	transporthttp "github.com/sbezhuk/beebase-media-service/internal/transport/http"
 	mediahttp "github.com/sbezhuk/beebase-media-service/internal/transport/http/media"
@@ -63,7 +65,22 @@ func run() error {
 		return fmt.Errorf("build JWKS verifier: %w", err)
 	}
 
-	mediaRepo := repopostgres.NewMediaRepository(db)
+	connectCtx, cancelConnect = context.WithTimeout(ctx, cfg.R2ConnectTimeout)
+	blobStore, err := r2.New(connectCtx, r2.Config{
+		Endpoint:        cfg.R2Endpoint,
+		Bucket:          cfg.R2Bucket,
+		AccessKeyID:     cfg.R2AccessKeyID,
+		SecretAccessKey: cfg.R2SecretAccessKey,
+	})
+	cancelConnect()
+	if err != nil {
+		return fmt.Errorf("connect to r2: %w", err)
+	}
+
+	log.Info("connected to r2", "bucket", cfg.R2Bucket)
+
+	metadataRepo := repopostgres.NewMediaRepository(db)
+	mediaRepo := mediarepo.New(metadataRepo, metadataRepo, blobStore, log)
 	mediaService := appmedia.NewService(mediaRepo, cfg.MaxUploadSizeBytes)
 	mediaHandler := mediahttp.NewHandler(mediaService, log, cfg.MaxUploadSizeBytes)
 

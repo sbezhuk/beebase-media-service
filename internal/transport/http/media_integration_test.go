@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	appmedia "github.com/sbezhuk/beebase-media-service/internal/application/media"
+	domainmedia "github.com/sbezhuk/beebase-media-service/internal/domain/media"
+	mediarepo "github.com/sbezhuk/beebase-media-service/internal/repository/media"
 	repopostgres "github.com/sbezhuk/beebase-media-service/internal/repository/postgres"
 	transporthttp "github.com/sbezhuk/beebase-media-service/internal/transport/http"
 	mediahttp "github.com/sbezhuk/beebase-media-service/internal/transport/http/media"
@@ -31,6 +34,47 @@ import (
 
 const testKID = "test-kid"
 const testMaxUploadSizeBytes = 1 << 20 // 1MB
+
+// fakeBlobStore is an in-memory domain/media.BlobStore standing in for
+// Cloudflare R2: these tests exercise the full HTTP flow against a real
+// PostgreSQL database (for metadata) without needing a real R2 bucket,
+// mirroring Put's real conditional-create semantics so idempotent-upload
+// behavior is exercised the same way it would be in production.
+type fakeBlobStore struct {
+	mu      sync.Mutex
+	objects map[uuid.UUID][]byte
+}
+
+func newFakeBlobStore() *fakeBlobStore {
+	return &fakeBlobStore{objects: map[uuid.UUID][]byte{}}
+}
+
+func (f *fakeBlobStore) Put(_ context.Context, mediaID uuid.UUID, content []byte, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.objects[mediaID]; exists {
+		return domainmedia.ErrBlobAlreadyExists
+	}
+	f.objects[mediaID] = append([]byte(nil), content...)
+	return nil
+}
+
+func (f *fakeBlobStore) Get(_ context.Context, mediaID uuid.UUID) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.objects[mediaID]
+	if !ok {
+		return nil, domainmedia.ErrBlobNotFound
+	}
+	return c, nil
+}
+
+func (f *fakeBlobStore) Delete(_ context.Context, mediaID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, mediaID)
+	return nil
+}
 
 type testStack struct {
 	server *httptest.Server
@@ -78,9 +122,10 @@ func newTestStack(t *testing.T) *testStack {
 		t.Fatalf("NewVerifierFromJWKSURL: %v", err)
 	}
 
-	mediaRepo := repopostgres.NewMediaRepository(tx)
-	mediaService := appmedia.NewService(mediaRepo, testMaxUploadSizeBytes)
 	log := logger.New("development", "error")
+	metadataRepo := repopostgres.NewMediaRepository(tx)
+	mediaRepo := mediarepo.New(metadataRepo, metadataRepo, newFakeBlobStore(), log)
+	mediaService := appmedia.NewService(mediaRepo, testMaxUploadSizeBytes)
 	handler := mediahttp.NewHandler(mediaService, log, testMaxUploadSizeBytes)
 
 	router := transporthttp.NewRouter(log, pool, handler, verifier)
