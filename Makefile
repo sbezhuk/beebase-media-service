@@ -1,6 +1,6 @@
 .PHONY: run build fmt vet test test-integration lint tidy \
 	migrate-up migrate-down migrate-new migrate-install \
-	db-clear migrate-blobs-to-r2 \
+	db-clear \
 	docker-up docker-down docker-build docker-logs
 
 APP_NAME := server
@@ -45,9 +45,6 @@ migrate-install: ## Install the golang-migrate CLI used by the targets above.
 
 db-clear: ## Permanently delete all data in DATABASE_URL, keeping the schema. Prompts for confirmation.
 	go run ./cmd/dbclear
-
-migrate-blobs-to-r2: ## One-time (safely re-runnable) migration of existing media content from DATABASE_URL into R2. Requires DATABASE_URL + R2_* env vars.
-	go run ./cmd/migrate-media-blobs
 
 docker-up: ## Start postgres + app via docker-compose.
 	docker compose up --build

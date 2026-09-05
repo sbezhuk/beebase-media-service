@@ -22,12 +22,6 @@ const pgUniqueViolation = "23505"
 // - internal/repository/media.Repository composes the two into the full
 // domain/media.Repository port, so nothing above that composite knows
 // metadata and content are stored in different places.
-//
-// media_blobs, the pre-R2 table that used to hold file content directly
-// in PostgreSQL, still exists purely as the migration's bookkeeping: a
-// remaining row there means that media id's content hasn't been moved to
-// R2 yet (see GetLegacyContent, and LegacyBlobStore in
-// legacy_blob_store.go). Every method here otherwise ignores it.
 type MediaRepository struct {
 	db Querier
 }
@@ -114,10 +108,7 @@ func (r *MediaRepository) ListByIDs(ctx context.Context, userID uuid.UUID, ids [
 	return items, nil
 }
 
-// Delete hard-deletes the media row belonging to userID. Its media_blobs
-// row, if any (only present for media the R2 migration hasn't reached
-// yet), cascades away via the table's ON DELETE CASCADE FK as part of the
-// same statement.
+// Delete hard-deletes the media row belonging to userID.
 func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID) error {
 	const q = `DELETE FROM media WHERE id = $1 AND user_id = $2`
 
@@ -134,8 +125,7 @@ func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID)
 
 // DeleteByIDs hard-deletes every row in ids belonging to userID in one
 // statement, returning the ids actually deleted so the caller can clean up
-// their stored content too. media_blobs rows, where still present, cascade
-// away via the table's ON DELETE CASCADE FK as part of the same statement.
+// their stored content too.
 func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]uuid.UUID, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -164,30 +154,3 @@ func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids
 	return deleted, nil
 }
 
-// GetLegacyContent returns mediaID's pre-R2, database-stored file content
-// (decompressed), or media.ErrBlobNotFound if there's none - either
-// because it was never stored that way, or because the background
-// migration has already moved it to R2 and removed the row. It's the
-// transitional fallback internal/repository/media.Repository.GetContent
-// uses while the migration is still in progress; see that type's doc
-// comment. Once the migration completes and media_blobs is dropped, this
-// method (and the fallback that calls it) can go away.
-func (r *MediaRepository) GetLegacyContent(ctx context.Context, mediaID uuid.UUID) ([]byte, error) {
-	const q = `SELECT data, compressed FROM media_blobs WHERE media_id = $1`
-
-	var data []byte
-	var compressed bool
-	if err := r.db.QueryRow(ctx, q, mediaID).Scan(&data, &compressed); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, media.ErrBlobNotFound
-		}
-		return nil, fmt.Errorf("postgres: get legacy media content: %w", err)
-	}
-
-	content, err := decompress(data, compressed)
-	if err != nil {
-		return nil, err
-	}
-
-	return content, nil
-}

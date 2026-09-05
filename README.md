@@ -129,10 +129,9 @@ internal/
   platform/hiveclient/             HiveVerifier implemented by calling hive-service over HTTP
   platform/r2/                     BlobStore implemented against Cloudflare R2 (S3-compatible API)
   repository/postgres/             media metadata (media table) against PostgreSQL (pgx, explicit
-                                     SQL); also the pre-R2 media_blobs migration's data access
+                                      SQL)
   repository/media/                composes the postgres metadata store + R2 BlobStore into the
-                                     full domain/media.Repository port - see Storage below
-  migration/blobmigrator/          the migration's actual algorithm, storage-agnostic
+                                      full domain/media.Repository port - see Storage below
   transport/http/                 chi router, health/ready handlers
     media/                            media HTTP handlers, request validation, responses
 ```
@@ -234,19 +233,10 @@ PostgreSQL metadata store and the R2 `BlobStore` into the
   delete itself is briefly unreachable (logged for later cleanup rather
   than failing the request).
 
-**Migrating existing data.** `cmd/migrate-media-blobs`
-(`make migrate-blobs-to-r2`) is a one-time, safely re-runnable command
-that uploads every row still sitting in the pre-R2 `media_blobs` table to
-R2 and deletes that row once the upload is confirmed stored —
-`media_blobs`'s remaining rows are themselves the migration's "still to
-do" bookkeeping, so an interrupted or failed run can simply be restarted.
-While that migration is in progress, `GetContent` transparently falls
-back to reading straight from `media_blobs` for any id R2 doesn't have
-yet, so retrieval never breaks mid-migration. Once every row has been
-migrated, `media_blobs` (and this fallback) can be dropped in a follow-up
-migration - see `internal/migration/blobmigrator` for the algorithm and
-`internal/repository/postgres/legacy_blob_store.go` for the PostgreSQL
-side of it.
+**Migration to Cloudflare R2.** File content previously stored in PostgreSQL
+was migrated to Cloudflare R2 (BEEB-32), and the legacy `media_blobs` table has
+been dropped via migration `000006_drop_media_blobs`. All reads and writes go
+directly to the R2 `BlobStore`.
 
 ## Security
 
@@ -287,9 +277,7 @@ make build              # build binary into bin/
 
 ### Integration tests
 
-Integration tests exercise the PostgreSQL metadata repository, the
-pre-R2 `media_blobs` migration path (`LegacyBlobStore` and
-`blobmigrator.Migrate` end-to-end against real PostgreSQL), and the full
+Integration tests exercise the PostgreSQL metadata repository and the full
 HTTP upload/attach/get/download/delete flow — including a real JWKS round
 trip, fake apiary-service and hive-service standing in for the real
 cross-service ownership checks, and two independently authenticated users

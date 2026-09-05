@@ -80,7 +80,7 @@ func run() error {
 	log.Info("connected to r2", "bucket", cfg.R2Bucket)
 
 	metadataRepo := repopostgres.NewMediaRepository(db)
-	mediaRepo := mediarepo.New(metadataRepo, metadataRepo, blobStore, log)
+	mediaRepo := mediarepo.New(metadataRepo, nil, blobStore, log)
 	mediaService := appmedia.NewService(mediaRepo, cfg.MaxUploadSizeBytes)
 	mediaHandler := mediahttp.NewHandler(mediaService, log, cfg.MaxUploadSizeBytes, cfg.PublicBaseURL)
 
