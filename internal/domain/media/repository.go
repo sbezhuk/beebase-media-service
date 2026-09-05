@@ -45,4 +45,11 @@ type Repository interface {
 	// or never existed) are simply not counted, never an error - a zero
 	// count is a normal outcome, not an error.
 	DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error)
+	// DeleteAllByUser hard-deletes every media row belonging to userID, and
+	// its stored content. Used by auth-service when it deletes an account,
+	// as the final sweep for media never referenced by any apiary/hive/
+	// inspection (e.g. the profile avatar, or an upload that was never
+	// attached to anything) - the apiary/hive/inspection cascades only
+	// ever reach the media ids those entities themselves know about.
+	DeleteAllByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 }

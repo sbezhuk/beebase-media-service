@@ -26,6 +26,7 @@ type metadataStore interface {
 	ListByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]*media.Media, error)
 	Delete(ctx context.Context, userID, mediaID uuid.UUID) error
 	DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) ([]uuid.UUID, error)
+	DeleteAllByUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // legacyContentReader reads content that's still sitting in the pre-R2
@@ -158,6 +159,24 @@ func (r *Repository) Delete(ctx context.Context, userID, mediaID uuid.UUID) erro
 // as Delete.
 func (r *Repository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.UUID) (int64, error) {
 	deleted, err := r.metadata.DeleteByIDs(ctx, userID, ids)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, id := range deleted {
+		if err := r.blobs.Delete(ctx, id); err != nil {
+			r.log.Error("media: failed to delete orphaned blob after metadata delete", "media_id", id, "error", err)
+		}
+	}
+
+	return int64(len(deleted)), nil
+}
+
+// DeleteAllByUser hard-deletes every metadata row belonging to userID in
+// one statement, then best-effort deletes each one's blob - same ordering
+// and rationale as Delete.
+func (r *Repository) DeleteAllByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	deleted, err := r.metadata.DeleteAllByUser(ctx, userID)
 	if err != nil {
 		return 0, err
 	}

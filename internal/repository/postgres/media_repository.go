@@ -154,3 +154,29 @@ func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids
 	return deleted, nil
 }
 
+// DeleteAllByUser hard-deletes every row belonging to userID in one
+// statement, returning the ids actually deleted so the caller can clean up
+// their stored content too.
+func (r *MediaRepository) DeleteAllByUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	const q = `DELETE FROM media WHERE user_id = $1 RETURNING id`
+
+	rows, err := r.db.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: delete all media by user: %w", err)
+	}
+	defer rows.Close()
+
+	var deleted []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: scan deleted media id: %w", err)
+		}
+		deleted = append(deleted, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: delete all media by user: %w", err)
+	}
+
+	return deleted, nil
+}

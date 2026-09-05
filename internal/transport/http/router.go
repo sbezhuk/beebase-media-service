@@ -47,6 +47,15 @@ func NewRouter(
 		// blocks external reachability, by never proxying this exact
 		// method+path.
 		r.Delete("/", mediaHandler.DeleteByIDs)
+		// Internal-only: called by auth-service when it deletes an account,
+		// to sweep up every media item belonging to the caller (including
+		// ones no apiary/hive/inspection ever referenced, e.g. the profile
+		// avatar). Registered as a literal "/mine" segment - chi resolves a
+		// static segment before a param one ({mediaID}), so this can never
+		// be shadowed by the Delete("/{mediaID}", ...) route above.
+		// beebase-gateway blocks external reachability the same way it does
+		// for every other internal-only route in this project.
+		r.Delete("/mine", mediaHandler.DeleteMine)
 	})
 
 	return r

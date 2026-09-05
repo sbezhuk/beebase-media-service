@@ -459,6 +459,49 @@ func TestMediaFlow_DeleteByIDs(t *testing.T) {
 	}
 }
 
+// TestMediaFlow_DeleteMine is DeleteMine's end-to-end proof: called by
+// auth-service when it deletes an account, DELETE /api/v1/media/mine must
+// remove every media item the caller owns - unlike DeleteByIDs, with no id
+// list at all - and never touch another user's media.
+func TestMediaFlow_DeleteMine(t *testing.T) {
+	stack := newTestStack(t)
+	owner := uuid.New()
+	other := uuid.New()
+	ownerToken := stack.tokenFor(t, owner)
+	otherToken := stack.tokenFor(t, other)
+
+	upload := func(token, filename string) mediahttp.Response {
+		resp := stack.upload(t, token, uploadOpts{filename: filename, content: jpegBytes})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("upload %s: status = %d, want %d", filename, resp.StatusCode, http.StatusCreated)
+		}
+		var created mediahttp.Response
+		decodeJSON(t, resp, &created)
+		return created
+	}
+
+	mine1 := upload(ownerToken, "1.jpg")
+	mine2 := upload(ownerToken, "2.jpg")
+	theirs := upload(otherToken, "3.jpg")
+
+	resp := stack.delete(t, "/api/v1/media/mine", ownerToken)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DeleteMine: status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	for _, gone := range []mediahttp.Response{mine1, mine2} {
+		resp = stack.get(t, "/api/v1/media/"+gone.ID.String(), ownerToken)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("get %s after DeleteMine: status = %d, want %d", gone.ID, resp.StatusCode, http.StatusNotFound)
+		}
+	}
+
+	resp = stack.get(t, "/api/v1/media/"+theirs.ID.String(), otherToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("another user's media should survive DeleteMine: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestMediaFlow_WithoutTokenIsUnauthorized(t *testing.T) {
 	stack := newTestStack(t)
 

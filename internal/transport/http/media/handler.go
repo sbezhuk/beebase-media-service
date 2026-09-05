@@ -245,6 +245,25 @@ func (h *Handler) DeleteByIDs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// DeleteMine handles DELETE /media/mine. It hard-deletes every media item
+// belonging to the caller, used by auth-service when it deletes an
+// account, to sweep up any media never referenced by an apiary/hive/
+// inspection (e.g. the profile avatar, or an upload that was never
+// attached to anything).
+func (h *Handler) DeleteMine(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	if _, err := h.service.DeleteAllMine(r.Context(), userID); err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // requireUserID returns the authenticated user's ID (from context, set by
 // httpmw.RequireAuth).
 func (h *Handler) requireUserID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {

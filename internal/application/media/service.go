@@ -221,3 +221,13 @@ func (s *Service) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids []uuid.
 
 	return s.media.DeleteByIDs(ctx, userID, dedup)
 }
+
+// DeleteAllMine hard-deletes every media item belonging to userID. Used by
+// auth-service when it deletes an account, as the final sweep for media
+// never referenced by any apiary/hive/inspection (e.g. the profile avatar,
+// or an upload that was never attached to anything) - unlike DeleteByIDs,
+// there is no cap here, since this always means "everything", not a
+// caller-supplied list.
+func (s *Service) DeleteAllMine(ctx context.Context, userID uuid.UUID) (int64, error) {
+	return s.media.DeleteAllByUser(ctx, userID)
+}

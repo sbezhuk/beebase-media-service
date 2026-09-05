@@ -92,6 +92,20 @@ func (f *fakeMetadata) DeleteByIDs(_ context.Context, userID uuid.UUID, ids []uu
 	return deleted, nil
 }
 
+func (f *fakeMetadata) DeleteAllByUser(_ context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	if f.failByIDs != nil {
+		return nil, f.failByIDs
+	}
+	var deleted []uuid.UUID
+	for id, row := range f.byID {
+		if row.m.UserID == userID {
+			delete(f.byID, id)
+			deleted = append(deleted, id)
+		}
+	}
+	return deleted, nil
+}
+
 // fakeLegacy is an in-memory stand-in for the pre-R2 media_blobs fallback
 // reader.
 type fakeLegacy struct {
@@ -395,5 +409,38 @@ func TestDeleteByIDs_DeletesOnlyTheBlobsActuallyRemoved(t *testing.T) {
 	}
 	if _, ok := blobs.objects[keep.ID]; !ok {
 		t.Errorf("unrelated media's blob was deleted")
+	}
+}
+
+// TestDeleteAllByUser_DeletesEveryBlobScopedToUser mirrors
+// TestDeleteByIDs_DeletesOnlyTheBlobsActuallyRemoved for the
+// account-deletion sweep: every blob belonging to userID is removed, and
+// another user's blob is left untouched.
+func TestDeleteAllByUser_DeletesEveryBlobScopedToUser(t *testing.T) {
+	metadata, blobs := newFakeMetadata(), newFakeBlobStore()
+	repo := mediarepo.New(metadata, nil, blobs, silentLogger())
+	owner := uuid.New()
+	other := uuid.New()
+
+	mine := newMedia(owner)
+	theirs := newMedia(other)
+	for _, m := range []*domainmedia.Media{mine, theirs} {
+		if err := repo.Create(context.Background(), m, []byte("x")); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	count, err := repo.DeleteAllByUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("DeleteAllByUser: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+	if _, ok := blobs.objects[mine.ID]; ok {
+		t.Errorf("blob for deleted media still present")
+	}
+	if _, ok := blobs.objects[theirs.ID]; !ok {
+		t.Errorf("another user's blob was deleted")
 	}
 }

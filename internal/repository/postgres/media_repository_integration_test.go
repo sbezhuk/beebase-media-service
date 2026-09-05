@@ -260,6 +260,54 @@ func TestMediaRepository_DeleteByIDs_EmptyIDsIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestMediaRepository_DeleteAllByUser_ScopedToUser proves the
+// account-deletion sweep removes every row belonging to a user - not just
+// a caller-supplied id list, unlike DeleteByIDs - and never touches
+// another user's media.
+func TestMediaRepository_DeleteAllByUser_ScopedToUser(t *testing.T) {
+	repo := newTestRepo(t)
+	owner := uuid.New()
+	other := uuid.New()
+
+	mine1 := media.New(uuid.New(), owner, "1.jpg", "image/jpeg", 3)
+	mine2 := media.New(uuid.New(), owner, "2.jpg", "image/jpeg", 3)
+	theirs := media.New(uuid.New(), other, "3.jpg", "image/jpeg", 3)
+	for _, m := range []*media.Media{mine1, mine2, theirs} {
+		if err := repo.Create(context.Background(), m); err != nil {
+			t.Fatalf("Create %s: %v", m.OriginalFilename, err)
+		}
+	}
+
+	deleted, err := repo.DeleteAllByUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("DeleteAllByUser: %v", err)
+	}
+	if len(deleted) != 2 {
+		t.Fatalf("DeleteAllByUser returned %v, want 2 ids", deleted)
+	}
+
+	for _, gone := range []*media.Media{mine1, mine2} {
+		if _, err := repo.GetByID(context.Background(), owner, gone.ID); err != media.ErrNotFound {
+			t.Fatalf("media %s survived DeleteAllByUser: %v", gone.ID, err)
+		}
+	}
+	if _, err := repo.GetByID(context.Background(), other, theirs.ID); err != nil {
+		t.Fatalf("another user's media should survive DeleteAllByUser: %v", err)
+	}
+}
+
+func TestMediaRepository_DeleteAllByUser_NoMediaIsNotAnError(t *testing.T) {
+	repo := newTestRepo(t)
+
+	deleted, err := repo.DeleteAllByUser(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("DeleteAllByUser for a user with none: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", deleted)
+	}
+}
+
 func TestMediaRepository_Create_IDConflict(t *testing.T) {
 	repo := newTestRepo(t)
 	id := uuid.New()
@@ -276,4 +324,3 @@ func TestMediaRepository_Create_IDConflict(t *testing.T) {
 		t.Fatalf("second Create with the same id: got %v, want ErrIDConflict", err)
 	}
 }
-

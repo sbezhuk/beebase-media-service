@@ -117,6 +117,19 @@ func (f *fakeRepo) DeleteByIDs(_ context.Context, userID uuid.UUID, ids []uuid.U
 	return count, nil
 }
 
+func (f *fakeRepo) DeleteAllByUser(_ context.Context, userID uuid.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var count int64
+	for id, s := range f.byID {
+		if s.m.UserID == userID {
+			delete(f.byID, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
 // --- test fixtures ---
 
 const maxUploadSizeBytes = 1 << 20 // 1MB, plenty for these tests
@@ -504,5 +517,50 @@ func TestDeleteByIDs_TooManyIDs(t *testing.T) {
 
 	if _, err := svc.DeleteByIDs(context.Background(), uuid.New(), ids); !errors.Is(err, appmedia.ErrTooManyIDs) {
 		t.Fatalf("DeleteByIDs with more than %d distinct ids: got %v, want ErrTooManyIDs", pagination.MaxLimit, err)
+	}
+}
+
+// TestDeleteAllMine_DeletesEveryItemScopedToUser proves DeleteAllMine
+// removes every media item the caller owns - not capped like DeleteByIDs,
+// since it always means "everything", not a caller-supplied list - and
+// leaves another user's media completely untouched.
+func TestDeleteAllMine_DeletesEveryItemScopedToUser(t *testing.T) {
+	svc := newService(newFakeRepo())
+	owner := uuid.New()
+	other := uuid.New()
+
+	mine1 := upload(t, svc, owner, "1.jpg", jpegBytes).Media
+	mine2 := upload(t, svc, owner, "2.jpg", jpegBytes).Media
+	theirs := upload(t, svc, other, "3.jpg", jpegBytes).Media
+
+	count, err := svc.DeleteAllMine(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("DeleteAllMine: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("DeleteAllMine count = %d, want 2", count)
+	}
+
+	for _, gone := range []*media.Media{mine1, mine2} {
+		if _, err := svc.Get(context.Background(), owner, gone.ID); !errors.Is(err, media.ErrNotFound) {
+			t.Fatalf("media %s survived DeleteAllMine: %v", gone.ID, err)
+		}
+	}
+	if _, err := svc.Get(context.Background(), other, theirs.ID); err != nil {
+		t.Fatalf("another user's media should survive DeleteAllMine: %v", err)
+	}
+}
+
+// TestDeleteAllMine_NoMedia_Noop proves a user with no media at all is
+// handled cleanly - a zero count, never an error.
+func TestDeleteAllMine_NoMedia_Noop(t *testing.T) {
+	svc := newService(newFakeRepo())
+
+	count, err := svc.DeleteAllMine(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("DeleteAllMine with no media: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
 	}
 }
