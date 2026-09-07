@@ -1,13 +1,17 @@
 name: CI
 
-# Test -> build -> push a Git-SHA-tagged image to ECR. Mirrors the
-# retired Azure DevOps template's trigger exactly: only a push to main
-# builds and pushes a new image - see beebase-gateway/README.md's
-# "Production deployment" section for what combines these per-service
-# images into an actual release.
+# Test -> build -> push a Git-SHA-tagged image to ECR. Runs only when a
+# release tag (v*) is pushed - a normal push to main or any other branch
+# never triggers this workflow, so a CI run (and an ECR push) happens
+# exactly once per intentional release cut, not on every commit. The
+# image itself is still tagged with the immutable commit SHA the tag
+# points at (${{ github.sha }}), never the tag name - see
+# beebase-gateway/README.md's "Production deployment" section for what
+# combines these per-service images into an actual release.
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -74,3 +78,28 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}-migrate
+
+      - name: Print production image summary
+        run: |
+          {
+            echo "## Production image built successfully"
+            echo ""
+            echo "**Service:** ${{ env.ECR_REPOSITORY }}"
+            echo "**Git tag:** ${{ github.ref_name }}"
+            echo "**Commit SHA:** \`${{ github.sha }}\`"
+            echo ""
+            echo "**Production image:**"
+            echo '```text'
+            echo "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+            echo '```'
+            echo ""
+            echo "**Migration image:**"
+            echo '```text'
+            echo "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}-migrate"
+            echo '```'
+            echo ""
+            echo "### Use this SHA for the production release"
+            echo '```text'
+            echo "${{ github.sha }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
