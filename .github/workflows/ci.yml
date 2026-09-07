@@ -1,0 +1,76 @@
+name: CI
+
+# Test -> build -> push a Git-SHA-tagged image to ECR. Mirrors the
+# retired Azure DevOps template's trigger exactly: only a push to main
+# builds and pushes a new image - see beebase-gateway/README.md's
+# "Production deployment" section for what combines these per-service
+# images into an actual release.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # exchanged for short-lived AWS credentials below - no long-lived keys stored in GitHub
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: beebase-media-service
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - run: go vet ./...
+      - run: go test ./...
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC - no long-lived keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Runner is x86_64; the alpine runtime stage's `apk add` step needs
+      # arm64 emulation to target EC2's Graviton (arm64) host - the Go
+      # build stage itself cross-compiles natively via TARGETOS/TARGETARCH
+      # (see the Dockerfile), no emulation needed for that half.
+      - name: Set up QEMU (linux/arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push app image (linux/arm64, tag=commit SHA)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Build & push migrate image (tag=<sha>-migrate)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migrate
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}-migrate
