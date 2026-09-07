@@ -23,7 +23,7 @@ info:
     store. GET .../download is the stable, authenticated URL a client
     fetches or displays a file from; there's no public/unauthenticated
     URL, and no separate object-storage credential to manage.
-  version: 0.1.0
+  version: 0.6.0
 servers:
   - url: http://localhost:8080
 
