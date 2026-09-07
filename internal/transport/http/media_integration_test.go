@@ -49,10 +49,10 @@ func (alwaysActiveSessionChecker) IsActive(_ context.Context, _, _ uuid.UUID) (b
 const testMaxUploadSizeBytes = 1 << 20 // 1MB
 
 // fakeBlobStore is an in-memory domain/media.BlobStore standing in for
-// Cloudflare R2: these tests exercise the full HTTP flow against a real
-// PostgreSQL database (for metadata) without needing a real R2 bucket,
-// mirroring Put's real conditional-create semantics so idempotent-upload
-// behavior is exercised the same way it would be in production.
+// S3: these tests exercise the full HTTP flow against a real PostgreSQL
+// database (for metadata) without needing a real S3 bucket, mirroring
+// Put's real conditional-create semantics so idempotent-upload behavior
+// is exercised the same way it would be in production.
 type fakeBlobStore struct {
 	mu      sync.Mutex
 	objects map[uuid.UUID][]byte

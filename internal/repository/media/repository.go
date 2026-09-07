@@ -1,8 +1,8 @@
 // Package media composes a metadata store and a media.BlobStore into the
-// full domain/media.Repository port, as BEEB-32's Cloudflare R2 migration:
-// file content moves to R2, media metadata stays in PostgreSQL exactly as
-// before. See Repository's doc comment for the ordering guarantees this
-// composition provides.
+// full domain/media.Repository port, as BEEB-32's original migration off
+// in-database blobs established: file content moves to object storage,
+// media metadata stays in PostgreSQL exactly as before. See Repository's
+// doc comment for the ordering guarantees this composition provides.
 package media
 
 import (
@@ -29,18 +29,18 @@ type metadataStore interface {
 	DeleteAllByUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error)
 }
 
-// legacyContentReader reads content that's still sitting in the pre-R2
-// media_blobs table (postgres.MediaRepository.GetLegacyContent), for
-// GetContent's migration-window fallback below.
+// legacyContentReader reads content that's still sitting in the
+// pre-object-storage media_blobs table (postgres.MediaRepository.
+// GetLegacyContent), for GetContent's migration-window fallback below.
 type legacyContentReader interface {
 	GetLegacyContent(ctx context.Context, mediaID uuid.UUID) ([]byte, error)
 }
 
 // Repository implements domain/media.Repository by storing metadata via
 // metadataStore (PostgreSQL, see internal/repository/postgres) and file
-// content via a media.BlobStore (Cloudflare R2 in production, see
-// internal/platform/r2). Its job is entirely about keeping those two
-// writes/deletes consistent with each other - see each method's own
+// content via a media.BlobStore (Amazon S3 in production, see
+// internal/platform/blobstore). Its job is entirely about keeping those
+// two writes/deletes consistent with each other - see each method's own
 // comment for the specific ordering and compensating-action rationale.
 type Repository struct {
 	metadata metadataStore
@@ -59,7 +59,8 @@ func New(metadata metadataStore, legacy legacyContentReader, blobs media.BlobSto
 
 // Create uploads content to the blob store first and only persists m's
 // metadata once that succeeds - per BEEB-32's storage contract, a media
-// row must never exist without its content actually being in R2.
+// row must never exist without its content actually being in the blob
+// store.
 //
 // If the metadata write then fails, the blob upload above already
 // committed; Create makes a best-effort attempt to delete it so a failed
@@ -121,7 +122,7 @@ func (r *Repository) GetContent(ctx context.Context, userID, mediaID uuid.UUID) 
 				// should be unreachable given Create keeps the two in
 				// sync; surfaced as a hard error rather than a 404 so it
 				// doesn't look like a client mistake.
-				return nil, nil, fmt.Errorf("media: media %s has no stored content in R2 or the legacy table", mediaID)
+				return nil, nil, fmt.Errorf("media: media %s has no stored content in the blob store or the legacy table", mediaID)
 			}
 			return nil, nil, fmt.Errorf("media: get legacy content: %w", legacyErr)
 		}

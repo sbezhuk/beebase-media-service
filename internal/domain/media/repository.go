@@ -17,7 +17,7 @@ import (
 // apiary-service's/hive-service's own concern; this service never learns
 // about it.
 //
-// How file content is physically stored (today: Cloudflare R2, behind
+// How file content is physically stored (today: Amazon S3, behind
 // the BlobStore port; metadata itself is always PostgreSQL, see
 // internal/repository/media and internal/repository/postgres) is
 // entirely an implementation detail of the concrete Repository: nothing

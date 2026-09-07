@@ -106,7 +106,7 @@ func (f *fakeMetadata) DeleteAllByUser(_ context.Context, userID uuid.UUID) ([]u
 	return deleted, nil
 }
 
-// fakeLegacy is an in-memory stand-in for the pre-R2 media_blobs fallback
+// fakeLegacy is an in-memory stand-in for the pre-object-storage media_blobs fallback
 // reader.
 type fakeLegacy struct {
 	byID map[uuid.UUID][]byte
@@ -195,7 +195,7 @@ func TestCreate_UploadsBlobThenMetadata(t *testing.T) {
 }
 
 // TestCreate_BlobUploadFailure_MetadataNeverPersisted proves the storage
-// contract from BEEB-32: if the R2 upload fails, no metadata row is ever
+// contract from BEEB-32: if the blob upload fails, no metadata row is ever
 // created.
 func TestCreate_BlobUploadFailure_MetadataNeverPersisted(t *testing.T) {
 	metadata, blobs := newFakeMetadata(), newFakeBlobStore()
@@ -281,13 +281,13 @@ func TestGetContent_ReadsFromBlobStore(t *testing.T) {
 }
 
 // TestGetContent_FallsBackToLegacyStoreDuringMigration proves retrieval
-// keeps working, uninterrupted, for media the background R2 migration
+// keeps working, uninterrupted, for media the background object-storage migration
 // hasn't reached yet.
 func TestGetContent_FallsBackToLegacyStoreDuringMigration(t *testing.T) {
 	metadata, blobs := newFakeMetadata(), newFakeBlobStore()
 	userID := uuid.New()
 	m := newMedia(userID)
-	metadata.byID[m.ID] = storedRow{m: *m} // metadata exists, but no blob in R2 yet
+	metadata.byID[m.ID] = storedRow{m: *m} // metadata exists, but no blob in the store yet
 
 	legacy := &fakeLegacy{byID: map[uuid.UUID][]byte{m.ID: []byte("still in postgres")}}
 	repo := mediarepo.New(metadata, legacy, blobs, silentLogger())
@@ -339,7 +339,7 @@ func TestDelete_RemovesMetadataAndBlob(t *testing.T) {
 }
 
 // TestDelete_BlobDeleteFailure_MetadataStillGone proves the deliberate
-// ordering: even if removing the blob fails (e.g. R2 briefly
+// ordering: even if removing the blob fails (e.g. the blob store briefly
 // unreachable), the media is already gone from every caller's point of
 // view because metadata is deleted first - Delete itself doesn't report
 // an error to the caller for a failure it can't do anything about

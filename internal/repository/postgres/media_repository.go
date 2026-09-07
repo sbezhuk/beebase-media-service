@@ -18,7 +18,7 @@ const pgUniqueViolation = "23505"
 
 // MediaRepository implements the metadata half of domain/media.Repository
 // against PostgreSQL: the media table only. File content lives in a
-// media.BlobStore (Cloudflare R2 in production, see internal/platform/r2)
+// media.BlobStore (Amazon S3 in production, see internal/platform/blobstore)
 // - internal/repository/media.Repository composes the two into the full
 // domain/media.Repository port, so nothing above that composite knows
 // metadata and content are stored in different places.

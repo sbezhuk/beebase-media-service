@@ -22,8 +22,9 @@ var ErrBlobNotFound = errors.New("blob not found")
 // BlobStore is the port through which media file content is physically
 // stored, keyed deterministically by media ID (Media ID -> object key ->
 // bytes) so no extra database column is needed to remember where a given
-// file lives. Today's implementation stores objects in Cloudflare R2 (see
-// internal/platform/r2); nothing above this interface knows or cares.
+// file lives. Today's implementation stores objects in Amazon S3 (see
+// internal/platform/blobstore); nothing above this interface knows or
+// cares.
 type BlobStore interface {
 	// Put stores content under mediaID's key. It only succeeds if no
 	// object already exists for mediaID - ErrBlobAlreadyExists otherwise -
