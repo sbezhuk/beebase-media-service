@@ -3,14 +3,19 @@ FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 
-# Build context is the repo root so the local beebase-common replace
-# directive in go.mod (../beebase-common) resolves inside the image too.
-COPY beebase-media-service/go.mod beebase-media-service/go.sum ./
-COPY beebase-common /beebase-common
+COPY go.mod go.sum ./
 RUN go mod download
 
-COPY beebase-media-service/. .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+COPY . .
+
+# TARGETOS/TARGETARCH are populated automatically by BuildKit to match
+# the requested --platform (e.g. `docker buildx build --platform
+# linux/arm64`); with no --platform given they default to the host's own
+# platform, so a plain local `docker build`/`docker compose build` is
+# unaffected and keeps building for the machine it runs on.
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
 
 ## Runtime stage
 FROM alpine:3.20

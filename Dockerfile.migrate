@@ -1,0 +1,6 @@
+# Bakes this service's migrations/ into the migrate/migrate image, so the
+# production host never needs a source checkout to run them - it only
+# ever pulls immutable, pre-built images (app + migrate) from ECR. Built
+# and tagged alongside the app image as <ecr-repo>:<git-sha>-migrate.
+FROM migrate/migrate:v4.19.0
+COPY migrations /migrations
