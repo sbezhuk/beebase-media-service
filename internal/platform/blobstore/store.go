@@ -1,9 +1,4 @@
-// Package blobstore implements domain/media.BlobStore against any
-// S3-compatible object storage. In production this is Amazon S3 itself;
-// the same code also works unmodified against Cloudflare R2 or any other
-// S3-compatible provider (e.g. for local development) by setting Endpoint
-// and ForcePathStyle - nothing outside this package knows or needs to
-// know which one is in use.
+// Package blobstore implements domain/media.BlobStore against Amazon S3.
 package blobstore
 
 import (
@@ -32,21 +27,15 @@ const keyPrefix = "media/"
 
 // Config configures a Store.
 //
-// Endpoint, AccessKeyID, SecretAccessKey, and ForcePathStyle are all
-// optional and should normally be left empty in production against
-// Amazon S3: with Endpoint empty, the AWS SDK resolves S3's standard
-// regional endpoint and uses virtual-hosted-style addressing; with no
-// static credentials given, the SDK's default credential chain resolves
-// them itself (environment variables, shared config/credentials file,
-// or - in production - the EC2 instance's IAM role via the instance
-// metadata service, with no long-lived key ever needing to exist).
-//
-// Set Endpoint (and typically ForcePathStyle) only when pointing this at
-// a non-AWS S3-compatible provider, e.g. Cloudflare R2
-// (https://<account-hash>.r2.cloudflarestorage.com) for a migration
-// window, or a local S3-compatible server for development. Set
-// AccessKeyID/SecretAccessKey only where that provider doesn't support
-// (or the deployment doesn't use) role-based credentials.
+// Bucket and Region are the only fields the application itself ever
+// sets. Endpoint, AccessKeyID, SecretAccessKey, and ForcePathStyle exist
+// solely so this package's own tests can point the real AWS SDK client
+// at an in-process fake S3 server (see store_test.go) - they are never
+// set from application configuration. Left empty, the AWS SDK resolves
+// S3's standard regional endpoint, virtual-hosted-style addressing, and
+// - in production - credentials from the EC2 instance's IAM role via the
+// SDK's default credential chain, with no long-lived key ever needing to
+// exist.
 type Config struct {
 	Bucket          string
 	Region          string
@@ -73,10 +62,10 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	}
 
 	// Static credentials are the exception, not the default: only used
-	// when explicitly configured (e.g. a provider with no IAM-role
-	// concept, or local development). Everywhere else, LoadDefaultConfig
-	// with no credentials override resolves them from the SDK's normal
-	// chain - on the production EC2 host, that means the instance role.
+	// by this package's own tests, against a fake server. Everywhere
+	// else, LoadDefaultConfig with no credentials override resolves them
+	// from the SDK's normal chain - on the production EC2 host, that
+	// means the instance role.
 	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),

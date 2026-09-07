@@ -199,7 +199,7 @@ func TestCreate_UploadsBlobThenMetadata(t *testing.T) {
 // created.
 func TestCreate_BlobUploadFailure_MetadataNeverPersisted(t *testing.T) {
 	metadata, blobs := newFakeMetadata(), newFakeBlobStore()
-	blobs.failPut = errors.New("simulated r2 outage")
+	blobs.failPut = errors.New("simulated storage outage")
 	repo := mediarepo.New(metadata, nil, blobs, silentLogger())
 	userID := uuid.New()
 	m := newMedia(userID)
@@ -352,7 +352,7 @@ func TestDelete_BlobDeleteFailure_MetadataStillGone(t *testing.T) {
 	if err := repo.Create(context.Background(), m, []byte("bye")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	blobs.failDelete = errors.New("simulated r2 outage")
+	blobs.failDelete = errors.New("simulated storage outage")
 
 	if err := repo.Delete(context.Background(), userID, m.ID); err != nil {
 		t.Fatalf("Delete with a failing blob store: %v, want nil (metadata delete already succeeded)", err)

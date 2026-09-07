@@ -35,9 +35,7 @@ own attach/list endpoints.
   JWKS document) reachable at `AUTH_JWKS_URL`
 - A running `beebase-apiary-service` reachable at `APIARY_SERVICE_URL`
 - A running `beebase-hive-service` reachable at `HIVE_SERVICE_URL`
-- An S3-compatible bucket (`STORAGE_BUCKET`, `STORAGE_REGION`; add
-  `STORAGE_ENDPOINT`/`STORAGE_ACCESS_KEY_ID`/`STORAGE_SECRET_ACCESS_KEY`/
-  `STORAGE_FORCE_PATH_STYLE` for a non-AWS provider) — see
+- An Amazon S3 bucket (`STORAGE_BUCKET`, `STORAGE_REGION`) — see
   [Storage](#storage)
 
 ## Quick start
@@ -113,12 +111,8 @@ is never used as a fallback, in development or in production.
 | `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on attach |
 | `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on attach |
 | `MAX_UPLOAD_SIZE_BYTES`     | `15728640` (15MB)            | Maximum size of a single uploaded file    |
-| `STORAGE_BUCKET`            | *(required)*                 | Bucket file content is stored in          |
-| `STORAGE_REGION`            | *(required)*                 | AWS region (or provider equivalent, e.g. `auto` for R2) |
-| `STORAGE_ENDPOINT`          | *(unset)*                    | Non-AWS S3-compatible endpoint; leave unset for real Amazon S3 |
-| `STORAGE_ACCESS_KEY_ID`     | *(unset)*                    | Static credential; leave unset in production to use the EC2 instance's IAM role |
-| `STORAGE_SECRET_ACCESS_KEY` | *(unset)*                    | Static credential; must be set together with `STORAGE_ACCESS_KEY_ID` or not at all |
-| `STORAGE_FORCE_PATH_STYLE`  | `false`                      | Path-style addressing; only needed for some non-AWS providers |
+| `STORAGE_BUCKET`            | *(required)*                 | S3 bucket file content is stored in       |
+| `STORAGE_REGION`            | *(required)*                 | AWS region the bucket lives in            |
 | `STORAGE_CONNECT_TIMEOUT`   | `5s`                         | Timeout for the initial storage connectivity check |
 | `TEST_DATABASE_URL`         | *(unset)*                    | Used only by `make test-integration`, never by the app |
 
@@ -126,17 +120,13 @@ is never used as a fallback, in development or in production.
 
 ```
 cmd/server/                    entry point: wires config, logger, db, blobstore, services, server
-cmd/migrate-r2-to-s3/            one-off tool: copies every object from the old Cloudflare R2
-                                     bucket to the new Amazon S3 bucket, verifies, never deletes
-                                     from R2 - see Storage below
 api/openapi.yaml                 API contract
 migrations/                      SQL migrations (golang-migrate format)
 internal/
   domain/media/                     Media entity, Repository + BlobStore ports; no infrastructure dependency
   application/media/                 use cases: upload, attach, get, download, list, delete;
                                      ApiaryVerifier/HiveVerifier ports (ownership checks)
-  platform/blobstore/              BlobStore implemented against any S3-compatible object storage
-                                      (Amazon S3 in production; see Storage below)
+  platform/blobstore/              BlobStore implemented against Amazon S3 (see Storage below)
   repository/postgres/             media metadata (media table) against PostgreSQL (pgx, explicit
                                       SQL)
   repository/media/                composes the postgres metadata store + blobstore.Store into the
@@ -205,11 +195,10 @@ storage.
 
 ## Storage
 
-File content is stored in **S3-compatible object storage** (Amazon S3 in
-production; see [internal/platform/blobstore](internal/platform/blobstore)
-- nothing above that package's `Store` type knows or cares which
-provider is in use); media metadata (filename, content type, size,
-timestamps) stays in PostgreSQL exactly as before, in the `media` table.
+File content is stored in **Amazon S3** (see
+[internal/platform/blobstore](internal/platform/blobstore)); media
+metadata (filename, content type, size, timestamps) stays in PostgreSQL
+exactly as before, in the `media` table.
 `GET /api/v1/media/{id}/download` is the stable, authenticated URL a
 client fetches or displays a file from; content is proxied through this
 service rather than a redirect to the bucket, which keeps authorization
@@ -225,10 +214,8 @@ itself from a raw id.
 A media row's object key is derived deterministically from its id
 (`internal/platform/blobstore`'s `ObjectKey`, currently `media/<id>`) —
 Media ID → Object Key → Media Binary — so no extra database column is
-needed to remember where a file lives, and retries/migrations are
-inherently idempotent per id. This key scheme is provider-independent
-and has never changed across storage backends, so existing `media` rows
-keep resolving correctly regardless of which provider is configured.
+needed to remember where a file lives, and retries are inherently
+idempotent per id.
 
 **Write ordering.** `internal/repository/media.Repository` composes the
 PostgreSQL metadata store and the `BlobStore` into the
@@ -248,14 +235,10 @@ PostgreSQL metadata store and the `BlobStore` into the
   than failing the request).
 
 **Storage provider history.** File content previously stored in
-PostgreSQL was migrated to Cloudflare R2 (BEEB-32); the legacy
+PostgreSQL was migrated to object storage (BEEB-32); the legacy
 `media_blobs` table was dropped via migration `000006_drop_media_blobs`.
-Production storage was later migrated from Cloudflare R2 to Amazon S3
-(see `cmd/migrate-r2-to-s3`) as part of the move to AWS - the object key
-scheme, and every metadata row referencing it, was unaffected by either
-migration. All reads and writes go directly to the configured
-`BlobStore`; there has never been an in-database blob fallback since the
-first of these two migrations.
+All reads and writes go directly to the configured `BlobStore`; there
+has never been an in-database blob fallback since that migration.
 
 ## Security
 
