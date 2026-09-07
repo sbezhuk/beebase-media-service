@@ -22,6 +22,13 @@ type Config struct {
 	DatabaseURL            string
 	DatabaseConnectTimeout time.Duration
 
+	// RedisAddr is the shared session store every BeeBase service checks on
+	// every request, so an access token can be rejected the instant its
+	// session is superseded by a newer one instead of staying valid until
+	// its own JWT expiry.
+	RedisAddr           string
+	RedisConnectTimeout time.Duration
+
 	LogLevel string // "debug", "info", "warn", "error"
 
 	// AuthJWKSURL points at auth-service's public key endpoint
@@ -65,6 +72,9 @@ func Load() (*Config, error) {
 		DatabaseURL:            getEnv("DATABASE_URL", ""),
 		DatabaseConnectTimeout: getDuration("DATABASE_CONNECT_TIMEOUT", 5*time.Second),
 
+		RedisAddr:           getEnv("REDIS_ADDR", ""),
+		RedisConnectTimeout: getDuration("REDIS_CONNECT_TIMEOUT", 5*time.Second),
+
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
 		AuthJWKSURL:   getEnv("AUTH_JWKS_URL", ""),
@@ -81,6 +91,9 @@ func Load() (*Config, error) {
 
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: DATABASE_URL is required")
+	}
+	if cfg.RedisAddr == "" {
+		return nil, fmt.Errorf("config: REDIS_ADDR is required")
 	}
 	if cfg.AuthJWKSURL == "" {
 		return nil, fmt.Errorf("config: AUTH_JWKS_URL is required")

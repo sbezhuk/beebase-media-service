@@ -23,6 +23,7 @@ import (
 	"github.com/sbezhuk/beebase-common/authmw"
 	"github.com/sbezhuk/beebase-common/logger"
 	"github.com/sbezhuk/beebase-common/server"
+	"github.com/sbezhuk/beebase-common/sessionstore"
 )
 
 func main() {
@@ -57,10 +58,22 @@ func run() error {
 
 	log.Info("connected to database")
 
+	redisConnectCtx, cancelRedisConnect := context.WithTimeout(ctx, cfg.RedisConnectTimeout)
+	redisClient, err := sessionstore.NewRedisClient(redisConnectCtx, cfg.RedisAddr)
+	cancelRedisConnect()
+	if err != nil {
+		return fmt.Errorf("connect to redis: %w", err)
+	}
+	defer redisClient.Close()
+
+	log.Info("connected to redis")
+
+	sessions := sessionstore.NewStore(redisClient)
+
 	// Fails fast at boot if auth-service's JWKS endpoint isn't reachable,
 	// consistent with how the database connection above is handled;
 	// docker-compose orders auth-service before this service accordingly.
-	verifier, err := authmw.NewVerifierFromJWKSURL(ctx, cfg.AuthJWKSURL)
+	verifier, err := authmw.NewVerifierFromJWKSURL(ctx, cfg.AuthJWKSURL, sessions)
 	if err != nil {
 		return fmt.Errorf("build JWKS verifier: %w", err)
 	}
