@@ -46,15 +46,20 @@ type Config struct {
 	// MaxUploadSizeBytes bounds how large a single uploaded file can be.
 	MaxUploadSizeBytes int64
 
-	// R2Endpoint is Cloudflare R2's jurisdiction-specific S3 API endpoint
-	// for the account (e.g. https://<account-hash>.r2.cloudflarestorage.com).
-	// File content is stored there, not in PostgreSQL - see the README's
-	// Storage section.
-	R2Endpoint        string
-	R2Bucket          string
-	R2AccessKeyID     string
-	R2SecretAccessKey string
-	R2ConnectTimeout  time.Duration
+	// File content is stored in S3-compatible object storage, not
+	// PostgreSQL - see the README's Storage section. In production this
+	// is Amazon S3, authenticated via the EC2 instance's IAM role
+	// (StorageAccessKeyID/StorageSecretAccessKey empty); StorageEndpoint
+	// and StorageForcePathStyle are only set to point this at a
+	// non-AWS-S3 provider (e.g. Cloudflare R2 during a migration window,
+	// or a local S3-compatible server for development).
+	StorageBucket          string
+	StorageRegion          string
+	StorageEndpoint        string
+	StorageAccessKeyID     string
+	StorageSecretAccessKey string
+	StorageForcePathStyle  bool
+	StorageConnectTimeout  time.Duration
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -82,11 +87,13 @@ func Load() (*Config, error) {
 
 		MaxUploadSizeBytes: getInt64("MAX_UPLOAD_SIZE_BYTES", 15*1024*1024),
 
-		R2Endpoint:        getEnv("R2_ENDPOINT", ""),
-		R2Bucket:          getEnv("R2_BUCKET", ""),
-		R2AccessKeyID:     getEnv("R2_ACCESS_KEY_ID", ""),
-		R2SecretAccessKey: getEnv("R2_SECRET_ACCESS_KEY", ""),
-		R2ConnectTimeout:  getDuration("R2_CONNECT_TIMEOUT", 5*time.Second),
+		StorageBucket:          getEnv("STORAGE_BUCKET", ""),
+		StorageRegion:          getEnv("STORAGE_REGION", ""),
+		StorageEndpoint:        getEnv("STORAGE_ENDPOINT", ""),
+		StorageAccessKeyID:     getEnv("STORAGE_ACCESS_KEY_ID", ""),
+		StorageSecretAccessKey: getEnv("STORAGE_SECRET_ACCESS_KEY", ""),
+		StorageForcePathStyle:  getBool("STORAGE_FORCE_PATH_STYLE", false),
+		StorageConnectTimeout:  getDuration("STORAGE_CONNECT_TIMEOUT", 5*time.Second),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -101,17 +108,16 @@ func Load() (*Config, error) {
 	if cfg.PublicBaseURL == "" {
 		return nil, fmt.Errorf("config: PUBLIC_BASE_URL is required")
 	}
-	if cfg.R2Endpoint == "" {
-		return nil, fmt.Errorf("config: R2_ENDPOINT is required")
+	if cfg.StorageBucket == "" {
+		return nil, fmt.Errorf("config: STORAGE_BUCKET is required")
 	}
-	if cfg.R2Bucket == "" {
-		return nil, fmt.Errorf("config: R2_BUCKET is required")
+	if cfg.StorageRegion == "" {
+		return nil, fmt.Errorf("config: STORAGE_REGION is required")
 	}
-	if cfg.R2AccessKeyID == "" {
-		return nil, fmt.Errorf("config: R2_ACCESS_KEY_ID is required")
-	}
-	if cfg.R2SecretAccessKey == "" {
-		return nil, fmt.Errorf("config: R2_SECRET_ACCESS_KEY is required")
+	// Static credentials are optional (production uses the EC2 instance
+	// role instead), but a half-supplied pair is always a misconfiguration.
+	if (cfg.StorageAccessKeyID == "") != (cfg.StorageSecretAccessKey == "") {
+		return nil, fmt.Errorf("config: STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY must be set together, or not at all")
 	}
 
 	return cfg, nil
@@ -146,4 +152,16 @@ func getInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return n
+}
+
+func getBool(key string, fallback bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }

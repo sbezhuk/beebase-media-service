@@ -13,8 +13,8 @@ import (
 
 	appmedia "github.com/sbezhuk/beebase-media-service/internal/application/media"
 	"github.com/sbezhuk/beebase-media-service/internal/config"
+	"github.com/sbezhuk/beebase-media-service/internal/platform/blobstore"
 	"github.com/sbezhuk/beebase-media-service/internal/platform/postgres"
-	"github.com/sbezhuk/beebase-media-service/internal/platform/r2"
 	mediarepo "github.com/sbezhuk/beebase-media-service/internal/repository/media"
 	repopostgres "github.com/sbezhuk/beebase-media-service/internal/repository/postgres"
 	transporthttp "github.com/sbezhuk/beebase-media-service/internal/transport/http"
@@ -78,19 +78,21 @@ func run() error {
 		return fmt.Errorf("build JWKS verifier: %w", err)
 	}
 
-	connectCtx, cancelConnect = context.WithTimeout(ctx, cfg.R2ConnectTimeout)
-	blobStore, err := r2.New(connectCtx, r2.Config{
-		Endpoint:        cfg.R2Endpoint,
-		Bucket:          cfg.R2Bucket,
-		AccessKeyID:     cfg.R2AccessKeyID,
-		SecretAccessKey: cfg.R2SecretAccessKey,
+	connectCtx, cancelConnect = context.WithTimeout(ctx, cfg.StorageConnectTimeout)
+	blobStore, err := blobstore.New(connectCtx, blobstore.Config{
+		Bucket:          cfg.StorageBucket,
+		Region:          cfg.StorageRegion,
+		Endpoint:        cfg.StorageEndpoint,
+		AccessKeyID:     cfg.StorageAccessKeyID,
+		SecretAccessKey: cfg.StorageSecretAccessKey,
+		ForcePathStyle:  cfg.StorageForcePathStyle,
 	})
 	cancelConnect()
 	if err != nil {
-		return fmt.Errorf("connect to r2: %w", err)
+		return fmt.Errorf("connect to object storage: %w", err)
 	}
 
-	log.Info("connected to r2", "bucket", cfg.R2Bucket)
+	log.Info("connected to object storage", "bucket", cfg.StorageBucket, "region", cfg.StorageRegion)
 
 	metadataRepo := repopostgres.NewMediaRepository(db)
 	mediaRepo := mediarepo.New(metadataRepo, nil, blobStore, log)

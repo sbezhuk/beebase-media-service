@@ -35,8 +35,10 @@ own attach/list endpoints.
   JWKS document) reachable at `AUTH_JWKS_URL`
 - A running `beebase-apiary-service` reachable at `APIARY_SERVICE_URL`
 - A running `beebase-hive-service` reachable at `HIVE_SERVICE_URL`
-- A Cloudflare R2 bucket and API token (`R2_ENDPOINT`, `R2_BUCKET`,
-  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) — see [Storage](#storage)
+- An S3-compatible bucket (`STORAGE_BUCKET`, `STORAGE_REGION`; add
+  `STORAGE_ENDPOINT`/`STORAGE_ACCESS_KEY_ID`/`STORAGE_SECRET_ACCESS_KEY`/
+  `STORAGE_FORCE_PATH_STYLE` for a non-AWS provider) — see
+  [Storage](#storage)
 
 ## Quick start
 
@@ -106,31 +108,33 @@ All configuration is via environment variables (see
 | `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on attach |
 | `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on attach |
 | `MAX_UPLOAD_SIZE_BYTES`     | `15728640` (15MB)            | Maximum size of a single uploaded file    |
-| `R2_ENDPOINT`               | *(required)*                 | Cloudflare R2's jurisdiction-specific S3 API endpoint for the account |
-| `R2_BUCKET`                 | *(required)*                 | R2 bucket file content is stored in       |
-| `R2_ACCESS_KEY_ID`          | *(required)*                 | R2 API token access key id                |
-| `R2_SECRET_ACCESS_KEY`      | *(required)*                 | R2 API token secret access key            |
-| `R2_CONNECT_TIMEOUT`        | `5s`                         | Timeout for the initial R2 connectivity check |
+| `STORAGE_BUCKET`            | *(required)*                 | Bucket file content is stored in          |
+| `STORAGE_REGION`            | *(required)*                 | AWS region (or provider equivalent, e.g. `auto` for R2) |
+| `STORAGE_ENDPOINT`          | *(unset)*                    | Non-AWS S3-compatible endpoint; leave unset for real Amazon S3 |
+| `STORAGE_ACCESS_KEY_ID`     | *(unset)*                    | Static credential; leave unset in production to use the EC2 instance's IAM role |
+| `STORAGE_SECRET_ACCESS_KEY` | *(unset)*                    | Static credential; must be set together with `STORAGE_ACCESS_KEY_ID` or not at all |
+| `STORAGE_FORCE_PATH_STYLE`  | `false`                      | Path-style addressing; only needed for some non-AWS providers |
+| `STORAGE_CONNECT_TIMEOUT`   | `5s`                         | Timeout for the initial storage connectivity check |
 | `TEST_DATABASE_URL`         | *(unset)*                    | Used only by `make test-integration`, never by the app |
 
 ## Project structure
 
 ```
-cmd/server/                    entry point: wires config, logger, db, r2, services, server
-cmd/migrate-media-blobs/         one-time (safely re-runnable) migration of existing media
-                                     content out of PostgreSQL and into R2 - see Storage below
+cmd/server/                    entry point: wires config, logger, db, blobstore, services, server
+cmd/migrate-r2-to-s3/            one-off tool: copies every object from the old Cloudflare R2
+                                     bucket to the new Amazon S3 bucket, verifies, never deletes
+                                     from R2 - see Storage below
 api/openapi.yaml                 API contract
 migrations/                      SQL migrations (golang-migrate format)
 internal/
   domain/media/                     Media entity, Repository + BlobStore ports; no infrastructure dependency
   application/media/                 use cases: upload, attach, get, download, list, delete;
                                      ApiaryVerifier/HiveVerifier ports (ownership checks)
-  platform/apiaryclient/           ApiaryVerifier implemented by calling apiary-service over HTTP
-  platform/hiveclient/             HiveVerifier implemented by calling hive-service over HTTP
-  platform/r2/                     BlobStore implemented against Cloudflare R2 (S3-compatible API)
+  platform/blobstore/              BlobStore implemented against any S3-compatible object storage
+                                      (Amazon S3 in production; see Storage below)
   repository/postgres/             media metadata (media table) against PostgreSQL (pgx, explicit
                                       SQL)
-  repository/media/                composes the postgres metadata store + R2 BlobStore into the
+  repository/media/                composes the postgres metadata store + blobstore.Store into the
                                       full domain/media.Repository port - see Storage below
   transport/http/                 chi router, health/ready handlers
     media/                            media HTTP handlers, request validation, responses
@@ -185,58 +189,68 @@ storage.
   path yet — it stays independently accessible to its uploader
   indefinitely. A TTL-based sweep for long-unattached uploads is a
   reasonable follow-up if this becomes a real storage concern.
-- Keeping an R2 object and its metadata row in sync across two separate
-  systems is best-effort, not transactional (see [Storage](#storage)): a
-  failure at exactly the wrong moment (R2 delete fails right after its
-  metadata row is gone, or the reverse during Create) can leave an
-  orphaned, unreferenced R2 object behind. It's logged when it happens,
-  and it's harmless — nothing can ever reach it without a metadata row
-  pointing at it — but there's no automated sweep for it yet.
+- Keeping a stored object and its metadata row in sync across two
+  separate systems is best-effort, not transactional (see
+  [Storage](#storage)): a failure at exactly the wrong moment (the
+  storage delete fails right after its metadata row is gone, or the
+  reverse during Create) can leave an orphaned, unreferenced object
+  behind. It's logged when it happens, and it's harmless — nothing can
+  ever reach it without a metadata row pointing at it — but there's no
+  automated sweep for it yet.
 
 ## Storage
 
-File content is stored in **Cloudflare R2** (S3-compatible object
-storage); media metadata (filename, content type, size, timestamps)
-stays in PostgreSQL exactly as before, in the `media` table.
+File content is stored in **S3-compatible object storage** (Amazon S3 in
+production; see [internal/platform/blobstore](internal/platform/blobstore)
+- nothing above that package's `Store` type knows or cares which
+provider is in use); media metadata (filename, content type, size,
+timestamps) stays in PostgreSQL exactly as before, in the `media` table.
 `GET /api/v1/media/{id}/download` is the stable, authenticated URL a
 client fetches or displays a file from; content is proxied through this
-service rather than a redirect to R2, which keeps authorization uniform
-with every other endpoint (one ownership-scoped DB lookup gates access)
-and means no R2-specific detail (bucket, object key, endpoint, a public
-URL) is ever exposed through the API. Every response that includes a
-media item (this service's own `Response`, and apiary-service's/hive-
-service's `images`) carries a ready-to-use `image_url` pointing at this
-route, built by the shared `beebase-common/medialink` package from
-`PUBLIC_BASE_URL` - a client never constructs this URL itself from a raw
-id.
+service rather than a redirect to the bucket, which keeps authorization
+uniform with every other endpoint (one ownership-scoped DB lookup gates
+access) and means no storage-specific detail (bucket, object key,
+endpoint, a public URL) is ever exposed through the API. Every response
+that includes a media item (this service's own `Response`, and apiary-
+service's/hive-service's `images`) carries a ready-to-use `image_url`
+pointing at this route, built by the shared `beebase-common/medialink`
+package from `PUBLIC_BASE_URL` - a client never constructs this URL
+itself from a raw id.
 
-A media row's R2 object key is derived deterministically from its id
-(`internal/platform/r2`'s `objectKey`, currently `media/<id>`) — Media ID
-→ R2 Object Key → Media Binary — so no extra database column is needed to
-remember where a file lives, and retries/migrations are inherently
-idempotent per id.
+A media row's object key is derived deterministically from its id
+(`internal/platform/blobstore`'s `ObjectKey`, currently `media/<id>`) —
+Media ID → Object Key → Media Binary — so no extra database column is
+needed to remember where a file lives, and retries/migrations are
+inherently idempotent per id. This key scheme is provider-independent
+and has never changed across storage backends, so existing `media` rows
+keep resolving correctly regardless of which provider is configured.
 
 **Write ordering.** `internal/repository/media.Repository` composes the
-PostgreSQL metadata store and the R2 `BlobStore` into the
+PostgreSQL metadata store and the `BlobStore` into the
 `domain/media.Repository` port every use case depends on:
 
-- **Create** uploads to R2 first, via a conditional ("create if absent")
-  `PutObject`, and only persists the metadata row once that succeeds — so
-  a media row can never exist without its content actually being in R2,
-  and a colliding client-supplied id can never silently overwrite
-  someone else's bytes. If the metadata write then fails, the just-
-  uploaded object is deleted best-effort so nothing is left orphaned
-  without a reason.
+- **Create** uploads to storage first, via a conditional ("create if
+  absent") `PutObject`, and only persists the metadata row once that
+  succeeds — so a media row can never exist without its content actually
+  being stored, and a colliding client-supplied id can never silently
+  overwrite someone else's bytes. If the metadata write then fails, the
+  just-uploaded object is deleted best-effort so nothing is left
+  orphaned without a reason.
 - **Delete/DeleteByIDs** remove the metadata row(s) first, then
-  best-effort delete the matching R2 object(s) — so a media id is
-  immediately gone from every caller's point of view even if the R2
+  best-effort delete the matching object(s) — so a media id is
+  immediately gone from every caller's point of view even if the storage
   delete itself is briefly unreachable (logged for later cleanup rather
   than failing the request).
 
-**Migration to Cloudflare R2.** File content previously stored in PostgreSQL
-was migrated to Cloudflare R2 (BEEB-32), and the legacy `media_blobs` table has
-been dropped via migration `000006_drop_media_blobs`. All reads and writes go
-directly to the R2 `BlobStore`.
+**Storage provider history.** File content previously stored in
+PostgreSQL was migrated to Cloudflare R2 (BEEB-32); the legacy
+`media_blobs` table was dropped via migration `000006_drop_media_blobs`.
+Production storage was later migrated from Cloudflare R2 to Amazon S3
+(see `cmd/migrate-r2-to-s3`) as part of the move to AWS - the object key
+scheme, and every metadata row referencing it, was unaffected by either
+migration. All reads and writes go directly to the configured
+`BlobStore`; there has never been an in-database blob fallback since the
+first of these two migrations.
 
 ## Security
 
@@ -281,11 +295,13 @@ Integration tests exercise the PostgreSQL metadata repository and the full
 HTTP upload/attach/get/download/delete flow — including a real JWKS round
 trip, fake apiary-service and hive-service standing in for the real
 cross-service ownership checks, and two independently authenticated users
-proving cross-user access is impossible — against a real database. R2
-itself is stood in for by an in-memory `BlobStore` fake in these tests
-(see `internal/repository/media` for the unit tests that exercise R2
-failure handling specifically, against fakes); there's no integration
-test against a live R2 bucket. They're gated on `TEST_DATABASE_URL` and
+proving cross-user access is impossible — against a real database. Object
+storage itself is stood in for by an in-memory `BlobStore` fake in these
+tests (see `internal/repository/media` for the unit tests that exercise
+storage failure handling specifically, against fakes, and
+`internal/platform/blobstore` for tests of the real S3 client against a
+fake S3-compatible HTTP server); there's no test against a live S3
+bucket. They're gated on `TEST_DATABASE_URL` and
 skip themselves (not fail) if it's unset, and every test runs inside a
 transaction that's rolled back afterward, so they never leave rows behind
 or need manual cleanup.
