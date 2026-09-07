@@ -3,7 +3,7 @@ resources:
     - repository: common
       type: github
       name: sbezhuk/beebase-common
-      ref: refs/tags/v0.3.1
+      ref: refs/tags/v0.4.0
       endpoint: github-sbezhuk # GitHub service connection - see deployment report
 
 extends:
