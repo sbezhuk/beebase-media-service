@@ -80,8 +80,10 @@ func run() error {
 
 	connectCtx, cancelConnect = context.WithTimeout(ctx, cfg.StorageConnectTimeout)
 	blobStore, err := blobstore.New(connectCtx, blobstore.Config{
-		Bucket: cfg.StorageBucket,
-		Region: cfg.StorageRegion,
+		Bucket:         cfg.StorageBucket,
+		Region:         cfg.StorageRegion,
+		Endpoint:       cfg.StorageEndpoint,
+		ForcePathStyle: cfg.StorageForcePathStyle,
 	})
 	cancelConnect()
 	if err != nil {

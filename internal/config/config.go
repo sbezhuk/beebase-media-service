@@ -53,6 +53,13 @@ type Config struct {
 	StorageBucket         string
 	StorageRegion         string
 	StorageConnectTimeout time.Duration
+
+	// StorageEndpoint overrides the S3 endpoint URL. Leave empty in
+	// production (real AWS); set to the MinIO base URL for local dev.
+	StorageEndpoint string
+	// StorageForcePathStyle enables path-style S3 addressing
+	// (endpoint/bucket/key). Required for MinIO; never set in production.
+	StorageForcePathStyle bool
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -83,6 +90,9 @@ func Load() (*Config, error) {
 		StorageBucket:         getEnv("STORAGE_BUCKET", ""),
 		StorageRegion:         getEnv("STORAGE_REGION", ""),
 		StorageConnectTimeout: getDuration("STORAGE_CONNECT_TIMEOUT", 5*time.Second),
+
+		StorageEndpoint:       getEnv("STORAGE_ENDPOINT", ""),
+		StorageForcePathStyle: getBool("STORAGE_FORCE_PATH_STYLE", false),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -136,4 +146,16 @@ func getInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return n
+}
+
+func getBool(key string, fallback bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
