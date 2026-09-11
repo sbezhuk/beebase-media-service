@@ -412,6 +412,35 @@ func TestDeleteByIDs_DeletesOnlyTheBlobsActuallyRemoved(t *testing.T) {
 	}
 }
 
+// TestDeleteByIDs_BlobDeleteFailure_MetadataStillGone mirrors
+// TestDelete_BlobDeleteFailure_MetadataStillGone for DeleteByIDs: even if
+// removing the blob fails, the media row is already gone from the metadata
+// store, leaving the database consistent.
+func TestDeleteByIDs_BlobDeleteFailure_MetadataStillGone(t *testing.T) {
+	metadata, blobs := newFakeMetadata(), newFakeBlobStore()
+	repo := mediarepo.New(metadata, nil, blobs, silentLogger())
+	userID := uuid.New()
+	m := newMedia(userID)
+	if err := repo.Create(context.Background(), m, []byte("bye")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blobs.failDelete = errors.New("simulated storage outage")
+
+	count, err := repo.DeleteByIDs(context.Background(), userID, []uuid.UUID{m.ID})
+	if err != nil {
+		t.Fatalf("DeleteByIDs with a failing blob store: %v, want nil (metadata delete already succeeded)", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+	if _, ok := metadata.byID[m.ID]; ok {
+		t.Errorf("metadata still present after DeleteByIDs")
+	}
+	if _, err := repo.GetByID(context.Background(), userID, m.ID); !errors.Is(err, domainmedia.ErrNotFound) {
+		t.Errorf("GetByID after DeleteByIDs: got %v, want ErrNotFound", err)
+	}
+}
+
 // TestDeleteAllByUser_DeletesEveryBlobScopedToUser mirrors
 // TestDeleteByIDs_DeletesOnlyTheBlobsActuallyRemoved for the
 // account-deletion sweep: every blob belonging to userID is removed, and
