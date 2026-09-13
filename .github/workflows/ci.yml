@@ -62,7 +62,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ECR has image tag immutability enabled, so re-running this workflow
+      # for a commit that was already released (e.g. re-tagging the same
+      # commit under a new release tag) would otherwise fail trying to
+      # overwrite the existing SHA tag. Skip the build/push when it's
+      # already there - the published image is byte-for-byte reproducible
+      # from this commit, so there's nothing to redo.
+      - name: Check whether app image already exists in ECR
+        id: image-check
+        run: |
+          if docker manifest inspect "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build & push app image (linux/arm64, tag=commit SHA)
+        if: steps.image-check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -71,6 +87,7 @@ jobs:
           tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
       - name: Build & push migrate image (tag=<sha>-migrate)
+        if: steps.image-check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
