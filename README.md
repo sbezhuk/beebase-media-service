@@ -58,8 +58,8 @@ docker compose up --build
 Verify it's up:
 
 ```bash
-curl http://localhost:8080/health   # liveness — always 200 while the process is up
-curl http://localhost:8080/ready    # readiness — 200 only if the database is reachable
+curl http://localhost:8080/health    # liveness — always 200 while the process is up
+curl http://localhost:8080/ready     # readiness — 200 only if the database is reachable
 
 TOKEN=...      # an access_token from auth-service's /api/v1/auth/register or /login
 APIARY_ID=...  # an apiary that TOKEN's owner created via apiary-service
