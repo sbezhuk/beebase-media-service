@@ -213,7 +213,7 @@ func (s *testStack) upload(t *testing.T, token string, opts uploadOpts) *http.Re
 	w := multipart.NewWriter(&buf)
 
 	if opts.mediaID != "" {
-		_ = w.WriteField("media_id", opts.mediaID)
+		_ = w.WriteField("mediaId", opts.mediaID)
 	}
 	if opts.filename != "" {
 		fw, err := w.CreateFormFile("file", opts.filename)

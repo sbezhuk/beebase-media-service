@@ -37,9 +37,9 @@ func NewRouter(
 
 		r.Post("/", mediaHandler.Upload)
 		r.Get("/", mediaHandler.List)
-		r.Get("/{mediaID}", mediaHandler.Get)
-		r.Get("/{mediaID}/download", mediaHandler.Download)
-		r.Delete("/{mediaID}", mediaHandler.Delete)
+		r.Get("/{mediaId}", mediaHandler.Get)
+		r.Get("/{mediaId}/download", mediaHandler.Download)
+		r.Delete("/{mediaId}", mediaHandler.Delete)
 		// Internal-only: called by apiary-service/hive-service when they
 		// delete an apiary/hive, to hard-delete every media id it knows it
 		// references. This route group's RequireAuth can't distinguish that

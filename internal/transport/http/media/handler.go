@@ -75,7 +75,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	req := UploadRequest{
-		MediaID: r.FormValue("media_id"),
+		MediaID: r.FormValue("mediaId"),
 	}
 	fields := req.Validate()
 
@@ -276,7 +276,7 @@ func (h *Handler) requireUserID(w http.ResponseWriter, r *http.Request) (uuid.UU
 }
 
 func (h *Handler) pathMediaID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	id, err := uuid.Parse(chi.URLParam(r, "mediaID"))
+	id, err := uuid.Parse(chi.URLParam(r, "mediaId"))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, CodeInvalidMediaID, "media id must be a valid UUID")
 		return uuid.Nil, false

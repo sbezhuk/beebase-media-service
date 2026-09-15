@@ -27,7 +27,7 @@ func TestUploadRequest_Validate(t *testing.T) {
 		{
 			name: "malformed media_id",
 			req:  UploadRequest{MediaID: "not-a-uuid"},
-			want: map[string]string{"media_id": CodeMediaIDInvalid},
+			want: map[string]string{"mediaId": CodeMediaIDInvalid},
 		},
 	}
 

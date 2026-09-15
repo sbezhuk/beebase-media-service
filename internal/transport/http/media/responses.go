@@ -18,13 +18,13 @@ import (
 // apiary-service's/hive-service's own responses (their `images` field).
 type Response struct {
 	ID               uuid.UUID `json:"id"`
-	OriginalFilename string    `json:"original_filename"`
-	ContentType      string    `json:"content_type"`
-	SizeBytes        int64     `json:"size_bytes"`
+	OriginalFilename string    `json:"originalFilename"`
+	ContentType      string    `json:"contentType"`
+	SizeBytes        int64     `json:"sizeBytes"`
 	Status           string    `json:"status"`
-	ImageURL         string    `json:"image_url"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ImageURL         string    `json:"imageUrl"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 func newResponse(m *media.Media, publicBaseURL string) Response {
