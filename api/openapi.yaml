@@ -331,7 +331,7 @@ components:
       type: object
       required: [file]
       properties:
-        media_id:
+        mediaId:
           type: string
           format: uuid
           description: Optional client-generated idempotency key for safely retrying a failed upload.
@@ -343,11 +343,11 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        original_filename: { type: string }
-        content_type: { type: string, example: image/jpeg }
-        size_bytes: { type: integer, format: int64 }
+        originalFilename: { type: string }
+        contentType: { type: string, example: image/jpeg }
+        sizeBytes: { type: integer, format: int64 }
         status: { type: string, enum: [available] }
-        image_url:
+        imageUrl:
           type: string
           format: uri
           description: >
@@ -356,8 +356,8 @@ components:
             service, reverse-proxied by the gateway), built fresh on
             every response from PUBLIC_BASE_URL. Prefer this field over
             constructing the download URL from id yourself.
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
 
     ErrorResponse:
       type: object

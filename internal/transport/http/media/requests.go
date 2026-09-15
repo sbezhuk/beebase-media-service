@@ -55,7 +55,7 @@ func (r *UploadRequest) Validate() map[string]string {
 
 	if r.MediaID != "" {
 		if _, err := uuid.Parse(r.MediaID); err != nil {
-			fields["media_id"] = CodeMediaIDInvalid
+		fields["mediaId"] = CodeMediaIDInvalid
 		}
 	}
 
