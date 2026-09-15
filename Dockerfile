@@ -2,9 +2,15 @@
 FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
+RUN apk add --no-cache git
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=secret,id=github_token,required=true \
+    GOPRIVATE=github.com/sbezhuk/beebase-common \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/github_token)@github.com/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/" \
+    go mod download
 
 COPY . .
 
