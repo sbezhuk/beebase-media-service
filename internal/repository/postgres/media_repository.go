@@ -110,7 +110,8 @@ func (r *MediaRepository) ListByIDs(ctx context.Context, userID uuid.UUID, ids [
 
 // Delete hard-deletes the media row belonging to userID.
 func (r *MediaRepository) Delete(ctx context.Context, userID, mediaID uuid.UUID) error {
-	const q = `DELETE FROM media WHERE id = $1 AND user_id = $2`
+	const q = `WITH deleted AS (DELETE FROM media WHERE id=$1 AND user_id=$2 RETURNING id)
+		INSERT INTO media_blob_deletion_tasks (media_id,user_id) SELECT id,$2 FROM deleted ON CONFLICT (media_id) DO UPDATE SET status='pending', next_attempt_at=NOW(), updated_at=NOW()`
 
 	tag, err := r.db.Exec(ctx, q, mediaID, userID)
 	if err != nil {
@@ -131,7 +132,8 @@ func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids
 		return nil, nil
 	}
 
-	const q = `DELETE FROM media WHERE id = ANY($1) AND user_id = $2 RETURNING id`
+	const q = `WITH deleted AS (DELETE FROM media WHERE id=ANY($1) AND user_id=$2 RETURNING id)
+		INSERT INTO media_blob_deletion_tasks (media_id,user_id) SELECT id,$2 FROM deleted ON CONFLICT (media_id) DO UPDATE SET status='pending', next_attempt_at=NOW(), updated_at=NOW() RETURNING media_id`
 
 	rows, err := r.db.Query(ctx, q, ids, userID)
 	if err != nil {
@@ -158,7 +160,8 @@ func (r *MediaRepository) DeleteByIDs(ctx context.Context, userID uuid.UUID, ids
 // statement, returning the ids actually deleted so the caller can clean up
 // their stored content too.
 func (r *MediaRepository) DeleteAllByUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
-	const q = `DELETE FROM media WHERE user_id = $1 RETURNING id`
+	const q = `WITH deleted AS (DELETE FROM media WHERE user_id=$1 RETURNING id)
+		INSERT INTO media_blob_deletion_tasks (media_id,user_id) SELECT id,$1 FROM deleted ON CONFLICT (media_id) DO UPDATE SET status='pending', next_attempt_at=NOW(), updated_at=NOW() RETURNING media_id`
 
 	rows, err := r.db.Query(ctx, q, userID)
 	if err != nil {

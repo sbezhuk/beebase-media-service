@@ -11,7 +11,10 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/google/uuid"
 	httpmw "github.com/sbezhuk/beebase-common/authmw"
+	"github.com/sbezhuk/beebase-common/httpx"
+	"github.com/sbezhuk/beebase-common/internalauth"
 	mediahttp "github.com/sbezhuk/beebase-media-service/internal/transport/http/media"
 )
 
@@ -21,7 +24,12 @@ func NewRouter(
 	db *pgxpool.Pool,
 	mediaHandler *mediahttp.Handler,
 	tokenParser httpmw.AccessTokenParser,
+	internalTokens ...string,
 ) http.Handler {
+	internalToken := ""
+	if len(internalTokens) > 0 {
+		internalToken = internalTokens[0]
+	}
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -31,6 +39,18 @@ func NewRouter(
 
 	r.Get("/health", HealthHandler)
 	r.Get("/ready", ReadyHandler(db))
+	r.With(internalauth.RequireAuth(internalToken)).Delete("/internal/api/v1/users/{userID}", func(w http.ResponseWriter, req *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(req, "userID"))
+		if err != nil {
+			httpx.WriteError(w, 400, "invalid_user_id", "invalid user id")
+			return
+		}
+		if err := mediaHandler.DeleteUserData(req.Context(), id); err != nil {
+			httpx.WriteError(w, 500, "cleanup_failed", "could not delete media")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	r.Route("/api/v1/media", func(r chi.Router) {
 		r.Use(httpmw.RequireAuth(tokenParser))

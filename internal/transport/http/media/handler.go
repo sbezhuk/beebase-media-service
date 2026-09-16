@@ -6,6 +6,7 @@
 package media
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,11 @@ type Handler struct {
 	log                *slog.Logger
 	maxUploadSizeBytes int64
 	publicBaseURL      string
+}
+
+func (h *Handler) DeleteUserData(ctx context.Context, userID uuid.UUID) error {
+	_, err := h.service.DeleteAllMine(ctx, userID)
+	return err
 }
 
 // NewHandler returns a Handler backed by service. maxUploadSizeBytes

@@ -34,7 +34,8 @@ type Config struct {
 	// AuthJWKSURL points at auth-service's public key endpoint
 	// (GET /.well-known/jwks.json), used to verify access tokens without
 	// ever holding a key that could mint one.
-	AuthJWKSURL string
+	AuthJWKSURL          string
+	InternalServiceToken string
 
 	// PublicBaseURL is the gateway's externally reachable base URL, used
 	// to build the image_url returned for each media item
@@ -59,7 +60,8 @@ type Config struct {
 	StorageEndpoint string
 	// StorageForcePathStyle enables path-style S3 addressing
 	// (endpoint/bucket/key). Required for MinIO; never set in production.
-	StorageForcePathStyle bool
+	StorageForcePathStyle      bool
+	BlobDeletionWorkerInterval time.Duration
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -82,8 +84,9 @@ func Load() (*Config, error) {
 
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
-		AuthJWKSURL:   getEnv("AUTH_JWKS_URL", ""),
-		PublicBaseURL: getEnv("PUBLIC_BASE_URL", ""),
+		AuthJWKSURL:          getEnv("AUTH_JWKS_URL", ""),
+		InternalServiceToken: getEnv("INTERNAL_SERVICE_TOKEN", ""),
+		PublicBaseURL:        getEnv("PUBLIC_BASE_URL", ""),
 
 		MaxUploadSizeBytes: getInt64("MAX_UPLOAD_SIZE_BYTES", 15*1024*1024),
 
@@ -91,8 +94,9 @@ func Load() (*Config, error) {
 		StorageRegion:         getEnv("STORAGE_REGION", ""),
 		StorageConnectTimeout: getDuration("STORAGE_CONNECT_TIMEOUT", 5*time.Second),
 
-		StorageEndpoint:       getEnv("STORAGE_ENDPOINT", ""),
-		StorageForcePathStyle: getBool("STORAGE_FORCE_PATH_STYLE", false),
+		StorageEndpoint:            getEnv("STORAGE_ENDPOINT", ""),
+		StorageForcePathStyle:      getBool("STORAGE_FORCE_PATH_STYLE", false),
+		BlobDeletionWorkerInterval: getDuration("BLOB_DELETION_WORKER_INTERVAL", 5*time.Second),
 	}
 
 	if cfg.DatabaseURL == "" {

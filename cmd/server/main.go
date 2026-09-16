@@ -94,10 +94,12 @@ func run() error {
 
 	metadataRepo := repopostgres.NewMediaRepository(db)
 	mediaRepo := mediarepo.New(metadataRepo, nil, blobStore, log)
+	blobDeletionQueue := repopostgres.NewBlobDeletionRepository(db)
+	go appmedia.NewBlobDeletionWorker(blobDeletionQueue, blobStore, log).Run(ctx, cfg.BlobDeletionWorkerInterval)
 	mediaService := appmedia.NewService(mediaRepo, cfg.MaxUploadSizeBytes)
 	mediaHandler := mediahttp.NewHandler(mediaService, log, cfg.MaxUploadSizeBytes, cfg.PublicBaseURL)
 
-	router := transporthttp.NewRouter(log, db, mediaHandler, verifier)
+	router := transporthttp.NewRouter(log, db, mediaHandler, verifier, cfg.InternalServiceToken)
 
 	srv := server.New(server.Config{
 		Addr:         ":" + cfg.HTTPPort,
