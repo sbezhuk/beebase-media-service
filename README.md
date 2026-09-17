@@ -106,7 +106,10 @@ is never used as a fallback, in development or in production.
 | `HTTP_SHUTDOWN_TIMEOUT`     | `15s`                        | Max time to wait for graceful shutdown    |
 | `DATABASE_URL`              | *(required)*                 | PostgreSQL DSN                            |
 | `DATABASE_CONNECT_TIMEOUT`  | `5s`                         | Timeout for the initial DB connection      |
+| `REDIS_ADDR`                | *(required)*                 | Shared Redis session store for token revocation checks |
+| `REDIS_CONNECT_TIMEOUT`     | `5s`                         | Timeout for the initial Redis connection   |
 | `AUTH_JWKS_URL`             | *(required)*                 | auth-service's public key endpoint, used to verify access tokens |
+| `INTERNAL_SERVICE_TOKEN`    | *(required)*                 | Credential for authenticated internal cleanup and existence calls |
 | `PUBLIC_BASE_URL`           | *(required)*                 | Gateway's externally reachable base URL, used to build each item's `image_url` |
 | `APIARY_SERVICE_URL`        | *(required)*                 | apiary-service's base URL, used to confirm apiary ownership on attach |
 | `HIVE_SERVICE_URL`          | *(required)*                 | hive-service's base URL, used to confirm hive ownership on attach |
